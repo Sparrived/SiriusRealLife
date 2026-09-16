@@ -43,8 +43,8 @@
 进行中的调用是一个**显式状态**（如 `thinking`）。调用期间 agent 照常收事件、照常可被抢占，且必须能被 `context` 取消。禁止在 tick 循环里同步等一次 30 秒的调用。
 
 **R5. 意识流必须有界。**
-三层分开：`stream`（全量日志，可归档）、`working`（最近 N 条，进 prompt）、`longterm`（压缩摘要）。
-**prompt 只读 `working` + `longterm`。** 任何往 prompt 里塞全量历史的代码都是 bug。
+分层存储，各层各有边界；**prompt 只读 `working` + 长期层，绝不塞全量历史**。任何往 prompt 里塞全量历史的代码都是 bug。
+层结构与遗忘机制见 [memory.md](docs/memory.md)（该文档是分层定义的唯一来源）。
 
 **R6. 每次状态转移都留下结构化日志。**
 `from`、`to`、`reason`（timeout/event/dispatch/preempt）、当时候选状态的权重快照、随机数。
@@ -55,6 +55,7 @@
 type Tool func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 ```
 工具只是给 LLM 的能力白名单，**不准**在工具里写业务逻辑或状态机逻辑。状态声明所需工具写 `Tools: []string{"read_app"}` 即可，禁止工具类继承、插件注册表、反射发现。
+⚠️ 措辞有**待确认的修订**（白名单 → 信息可见性 + 建议动作），见 [memory.md](docs/memory.md) §8.1。修订前按白名单执行。
 
 **R8. 时间是一等公民。**
 业务逻辑只认 tick 序号，不认 `time.Now()`。真实时间与游戏时间的换算**只在 tick 源头做一次**。这样离线推演、加速、回放全都免费。
@@ -72,6 +73,7 @@ Sirius 不直接调用任何模型供应商，不引入供应商 SDK，代码里
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 状态/心境/分派器/tick/意识流五要素、数据流、目录结构 |
+| [docs/memory.md](docs/memory.md) | 记忆与注意力模型：QQ 门控、四层记忆、打捞、遗忘/Shadow |
 | [docs/conventions.md](docs/conventions.md) | Go / Vue / API 编码约定、提交规范、文档规范 |
 | [docs/llm-amkr.md](docs/llm-amkr.md) | AMKR 接入全部细则：客户端、任务路由、超时、WebUI 反代、部署 |
 | [docs/roadmap.md](docs/roadmap.md) | 反目标、MVP 范围与验收标准、待定项 |

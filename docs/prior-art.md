@@ -7,6 +7,7 @@
 - **本会话 `web_search` 不可用**（DeepSeek 搜索端点 402 余额不足），所有材料来自直接抓取 + GitHub API 搜索。
 - 因此覆盖**不是系统性的**：以公认的经典项目为锚点（Stanford Generative Agents、DeepMind Concordia），再用 GitHub API 按主题补搜。可能存在遗漏。
 - 每条结论都标了出处。带 ⚠️ 的是**我的推断**，不是原文结论。
+- **量化常量已逐字核对**（对 arXiv 全文，非摘要）。核对结果见 §1.6。
 
 ---
 
@@ -80,14 +81,42 @@ importance 的原文 prompt：
 
 ⚠️ **我的建议**：v1 不需要完整的递归计划器，但至少要有**一个粗粒度的当日意图**（哪怕就是"今天想干什么"一句话，每天生成一次），让状态分派**在意图的约束下**加权抽取。这样成本极低，却能拦住"吃三次午饭"这类问题。
 
-### 1.5 消融实验与已知失败模式
+### 1.6 常量核对结果（已对全文逐字核实）
+
+初稿里几个数值是凭既有印象写的，**现已全部对 arXiv 全文核对，结论：七处全部正确**。以下为原文依据，可直接作为实现时的初始值。
+
+| 常量 | 值 | 原文依据 |
+|---|---|---|
+| recency 衰减系数 | **0.995** | "Our decay factor is 0.995" |
+| recency 度量 | **游戏内小时**，自**上次被检索**起算 | "exponential decay function over the number of sandbox game hours since the memory was last retrieved" |
+| importance 量程 | **1–10 整数**，由 LLM 生成，**创建记忆时打分** | "returns an integer value of 2 for 'cleaning up the room' and 8 for 'asking your crush out on a date'"；"generated at the time the memory object is created" |
+| 三项权重 α | **全部 = 1** | "all αs are set to 1" |
+| 归一化方式 | **min-max 缩放到 [0,1]** | "normalize … to the range of [0,1] using min-max scaling" |
+| 反思触发阈值 | **重要度和 > 150** | "exceeds a threshold (150 in our implementation)" |
+| 反思取用条数 | **最近 100 条** | "we query the large language model with the 100 most recent records" |
+| 反思产出 | **3 个问题 → 5 条洞见**，洞见须**引用来源记录** | "what are 3 most salient high-level questions"；"What 5 high-level insights … (example format: insight (because of 1, 5, 3))"；"cite the particular records that served as evidence" |
+| 反思频率（观测值） | 约**每天 2–3 次** | "our agents reflected roughly two or three times a day" |
+| 计划层级 | 大纲 **5–8 块** → 小时级 → **5–15 分钟**级 | "divided into five to eight chunks"；"recursively decompose this again into 5–15 minute chunks" |
+
+原文出处（arxiv.org/html/2304.03442v2）：recency/importance/relevance 三项及其公式见 §4.1；反思阈值、条数、两段式 prompt 见 §4.2；计划的递归分解见 §4.3。
+
+**一处需澄清**：论文说 recency 按"**自上次被检索以来**"的小时数衰减（`since the memory was last retrieved`），不是自创建以来。这意味着**检索行为本身会刷新 recency** —— 被反复想起的事会更持久，这正是 [`memory.md`](memory.md) 讨论"打捞/遗忘"时要对齐的机制，且与仿生记忆曲线同源。
+
+---
+
+### 1.7 已核实的失败模式（可作为验收清单）
+
+论文原文（§6 讨论）列出三类最常见错误：
+
+> the most common errors arose when the agent **failed to retrieve relevant memories**, **fabricated embellishments** to the agent's memory, or **inherited overly formal speech or behavior** from the language model.
+
+并有一条脚注解释第三类：这种过分正式的语气**很可能来自底座模型的 instruction tuning**，属于模型特性而非架构缺陷 —— "We expect that the writing style will be better controllable in future language models."
+
+⚠️ **对你的意义**：第三条是**可以通过人格设定压制**的（在 system prompt 里给定语言习惯、口头禅、句长），不该指望它自己好转。前两条才是架构问题。
+
+### 1.8 消融与伦理
 
 - **消融**：观察、计划、反思**三者各自都关键**（removing any one degrades believability）——不是可选项。
-- **最常见的三类错误**（论文明确列出，可以直接当验收清单）：
-  1. **检索失败**——没取回相关记忆
-  2. **虚构/添油加醋**（fabricated embellishments）——编造没发生过的事
-  3. **继承了 LLM 过于正式的说话方式**
-
 - **伦理提醒**（论文自己强调，你如果公开部署要留意）：应调优以**降低用户产生准社会关系（parasocial）的风险**、应**记录日志**以缓解 deepfake 与定向说服风险。
 
 ---

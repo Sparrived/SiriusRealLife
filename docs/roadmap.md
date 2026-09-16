@@ -17,11 +17,14 @@
 ## 2. MVP 范围（第一版只做这些）
 
 - 1 个 agent，4 个状态（刷手机 / 发呆 / 工作 / 找人聊天）
-- 1 个工具（`read_app`）
+- 1 个工具（`read_app`）+ QQ 门控与翻阅：见 [`memory.md`](memory.md) §9
 - 固定 tick 循环，状态表硬编码在 Go 里
 - LLM 走 AMKR，调用点先用**一个**任务名（如 `TASK_000001`），verify 通链路后再拆分
 - SSE 推流转到 Vue，页面显示实时意识流 + 状态图（当前节点高亮）
 - `/amkr/` 反代可用，能在 Sirius 页面上切到 AMKR WebUI 配模型
+
+**记忆部分只做**：unread 队列 + `@我`/回复打断（带 `uninterruptible` guard）、关键词打捞返回整段、记忆曲线衰减 + Shadow。
+**不做**：RAG/embedding（事件记忆先用关键词 + LLM 重排）、LLM 整合。<br>理由见 [`memory.md`](memory.md) §9——先验证"遗忘与打捞"能否产生可信行为，再决定是否为向量检索付配置成本。
 
 ### 验收标准
 
@@ -48,6 +51,10 @@
 |---|---|---|
 | LLM 接入 | **已定** | 统一走 AMKR 的 OpenAI 兼容接口，调用点用 `TASK_XXXXXX` 任务名。见 [`llm-amkr.md`](llm-amkr.md) |
 | 进程模型 | **已定（v1）** | docker compose 两容器；单镜像双进程留作后续优化 |
+| embedding / RAG | **待定（有阻塞）** | AMKR 无 embeddings 端点，泛型 `/v1/{path}` 可透传。见 [`memory.md`](memory.md) §5.2 |
+| Shadow 语义 | **待确认** | 低优先池还是物理删除？见 [`memory.md`](memory.md) §7 |
+| 升格阈值 | **待确认** | 待选区→事件记忆的触发条件；建议同时引入 importance 对冲 |
+| R7 措辞 | **待确认** | 工具白名单 → 信息可见性 + 建议动作。见 [`memory.md`](memory.md) §8.1 |
 | 任务名划分 | 待定 | 先用一个任务跑通，之后按调用点（状态分派 / 内心独白 / 工具解读）拆 |
 | Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外 |
 | 持久化 | 暂不需要 | v1 全内存，重启即清零 |
