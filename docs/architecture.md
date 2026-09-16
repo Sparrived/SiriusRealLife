@@ -6,7 +6,7 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 
 - 任一时刻只持有**一个**状态
 - 状态由**随机分派器**（带权重、冷却、前置条件）选出，也可被事件抢占
-- 状态 = 一段有明确出口的过程：目标 + 可用工具白名单 + 退出条件
+- 状态 = 一段有明确出口的过程：目标 + 信息可见性 + 退出条件
 - 时间由固定 **tick** 驱动，随机只在"该换状态了"这一刻介入
 
 技术栈：**Go** 后端 + **Vue 3** 前端。LLM 全部经 AMKR（见 [`llm-amkr.md`](llm-amkr.md)）。
@@ -29,7 +29,10 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 | `guard` | 前置条件，不满足则不进入候选 |
 | `minTick` / `maxTick` | 持续时长区间 |
 | `cooldown` | 冷却期，刚离开的状态短期内不被选中 |
-| `tools` | 该状态可用的工具白名单（字符串名，如 `["read_app"]`） |
+| `suggests` | **建议动作**（进 prompt 提示"现在适合做什么"），非硬白名单 |
+| `blocks` | 例外：明确要**硬封锁**的工具（须有安全/一致性理由） |
+| `visibility` | 该状态下**哪些信息可见**（如仅"看 QQ"状态可见 QQ 消息） |
+| `uninterruptible` | 为真时高优先级事件**延迟**而非抢占（如 `sleeping`） |
 | `onEnter` / `onExit` | 进入/退出时的副作用（只允许改心境与写意识流） |
 
 状态**不携带情绪**。`ANGRY_WORKING` 是错的（R2）。
@@ -62,15 +65,20 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 
 ### 2.5 意识流（memory）
 
-三层，必须分开且必须有界（R5）：
+分层存储，各自有界（R5）。**层结构、打捞、遗忘、自我模型的完整定义见 [`memory.md`](memory.md)——该文档是唯一来源。**
 
-| 层 | 用途 | 边界 |
+速览：
+
+| 层 | 用途 | 进 prompt |
 |---|---|---|
-| `stream` | 全量日志，可归档 | 不设硬上限，但不进 prompt |
-| `working` | 最近 N 条 | 进 prompt 的就是这一层 |
-| `longterm` | 压缩摘要 | 定期从 stream 压缩而来 |
+| `working` | 当前状态的即时上下文 | ✅ 是 |
+| `staging` | 待选区，关键词打捞、记忆曲线 | 打捞后部分进 |
+| `event` | 事件记忆，RAG + 关键词 | 打捞后部分进 |
+| `consolidated` | 整合记忆，细节已丢 | 可被检索 |
+| `self-model` | 自指陈述，有界 | ✅ 常驻 |
+| Shadow | 存档但 LLM 不可读 | ❌ 永不 |
 
-**prompt 只读 `working` + `longterm`。** 任何往 prompt 里塞全量历史的代码都是 bug。
+**prompt 只读 `working` + `self-model` + 打捞结果。** 任何往 prompt 里塞全量历史的代码都是 bug。
 
 ### 2.6 数据流
 
@@ -105,7 +113,7 @@ internal/fsm/        状态机核心：状态定义、分派器、tick 循环、
 internal/mood/       心境（连续量），影响分派权重与工具参数
 internal/tools/      工具实现，每个工具一个文件
 internal/llm/        LLM 客户端。唯一实现是 AMKR 的 OpenAI 兼容接口
-internal/memory/     意识流三层：stream / working / longterm
+internal/memory/     记忆分层：staging / event / consolidated / self-model / Shadow
 internal/transport/  HTTP 路由 + SSE 推送 + AMKR WebUI 反代
 config/              状态表、权重、prompt 模板
 web/                 Vue 3 + Vite + TS 前端

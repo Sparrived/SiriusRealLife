@@ -16,15 +16,23 @@
 
 ## 2. MVP 范围（第一版只做这些）
 
-- 1 个 agent，4 个状态（刷手机 / 发呆 / 工作 / 找人聊天）
-- 1 个工具（`read_app`）+ QQ 门控与翻阅：见 [`memory.md`](memory.md) §9
+MVP 的 4 个状态（QQ 可见性标在括号里）：
+
+| 状态 | QQ 消息可见 | 说明 |
+|---|---|---|
+| `scrolling_phone` | ✅ **看 QQ 就发生在这里** | 进入时返回最近 N 条，可用翻阅工具 |
+| `idle` | ❌ | 发呆，消息静默入队 |
+| `working` | ❌ | 工作，消息静默入队 |
+| `sleeping` | ❌ | `uninterruptible: true`，@ 也延迟 |
+
+- 1 个工具（`read_app`）——QQ 门控与翻阅见 [`memory.md`](memory.md) §2
 - 固定 tick 循环，状态表硬编码在 Go 里
 - LLM 走 AMKR，调用点先用**一个**任务名（如 `TASK_000001`），verify 通链路后再拆分
 - SSE 推流转到 Vue，页面显示实时意识流 + 状态图（当前节点高亮）
 - `/amkr/` 反代可用，能在 Sirius 页面上切到 AMKR WebUI 配模型
 
-**记忆部分只做**：unread 队列 + `@我`/回复打断（带 `uninterruptible` guard）、关键词打捞返回整段、记忆曲线衰减 + Shadow。
-**不做**：RAG/embedding（事件记忆先用关键词 + LLM 重排）、LLM 整合。<br>理由见 [`memory.md`](memory.md) §9——先验证"遗忘与打捞"能否产生可信行为，再决定是否为向量检索付配置成本。
+**记忆部分按 [`memory.md`](memory.md) §8 Phase 1 做**：unread 队列、`@我`/回复打断（带 `uninterruptible` guard）、已读游标、关键词打捞返回整段、记忆曲线 + Shadow、升格（源条目删除）。
+**Phase 1 不做**：RAG/embedding、LLM 整合、自我模型。
 
 ### 验收标准
 
@@ -34,14 +42,17 @@
 2. 每次状态转移都有结构化日志（R6）
 3. LLM 调用期间状态机**不被阻塞**（R4）—— 调用中仍能收事件、仍能被抢占
 4. 同一状态不连续进入两次（R3）
+5. 不在 `scrolling_phone` 时 QQ 消息**不进 prompt**；被 @ 能打断；`sleeping` 时不打断但有记录
+6. 有记忆因长期不打捞而沉入 Shadow，且 Shadow 内容**不出现在 prompt**
 
 ## 3. 跑通之后再考虑
 
-按优先级，不承诺顺序：
+按 [`memory.md`](memory.md) §8 的分期，不承诺顺序：
 
+- **Phase 2**：LLM 整合（event → consolidated）、自我模型 + 常驻 prompt、整合记忆参与检索
+- **Phase 3**：RAG（若关键词打捞被证明不够用，且 AMKR 侧 embedding 可用）
 - 多个 agent 互动
 - 心境真正影响权重（MVP 里心境可以只是存在但不参与）
-- 长期记忆压缩（`longterm` 的实际生成）
 - 配置热加载（状态表迁到 `config/`）
 - 单镜像双进程分发
 
@@ -51,10 +62,12 @@
 |---|---|---|
 | LLM 接入 | **已定** | 统一走 AMKR 的 OpenAI 兼容接口，调用点用 `TASK_XXXXXX` 任务名。见 [`llm-amkr.md`](llm-amkr.md) |
 | 进程模型 | **已定（v1）** | docker compose 两容器；单镜像双进程留作后续优化 |
-| embedding / RAG | **待定（有阻塞）** | AMKR 无 embeddings 端点，泛型 `/v1/{path}` 可透传。见 [`memory.md`](memory.md) §5.2 |
-| Shadow 语义 | **待确认** | 低优先池还是物理删除？见 [`memory.md`](memory.md) §7 |
-| 升格阈值 | **待确认** | 待选区→事件记忆的触发条件；建议同时引入 importance 对冲 |
-| R7 措辞 | **待确认** | 工具白名单 → 信息可见性 + 建议动作。见 [`memory.md`](memory.md) §8.1 |
+| Shadow 语义 | **已定** | 存档但 LLM 不可读（可审计）。见 [`memory.md`](memory.md) §3.1 |
+| 升格/整合去向 | **已定** | 升格→源条目**删除**（防重复事件记忆）；整合→源条目**进 Shadow**。见 [`memory.md`](memory.md) §3.2 |
+| 升格阈值 | **已定（可调初值）** | 100 tick 内打捞 ≥3 次，或 importance ≥7 且打捞 ≥1 次。见 [`memory.md`](memory.md) §5.3 |
+| 整合记忆影响行为 | **已定** | 双通道：可被检索 + 自指内容进**自我模型**常驻 prompt。见 [`memory.md`](memory.md) §6 |
+| R7 工具可见性 | **已定** | 状态声明信息可见性 + 建议动作，非工具白名单。见 [`memory.md`](memory.md) §7.1 |
+| embedding / RAG | **推迟到 Phase 3** | AMKR 无 embeddings 端点，泛型 `/v1/{path}` 可透传。Phase 1/2 用关键词 + LLM 重排。见 [`memory.md`](memory.md) §5.2 |
 | 任务名划分 | 待定 | 先用一个任务跑通，之后按调用点（状态分派 / 内心独白 / 工具解读）拆 |
 | Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外 |
 | 持久化 | 暂不需要 | v1 全内存，重启即清零 |
