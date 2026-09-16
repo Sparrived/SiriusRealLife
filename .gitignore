@@ -1,0 +1,16 @@
+# deps / build
+node_modules/
+dist/
+*.exe
+*.test
+*.out
+bin/
+
+# local config & secrets
+.env
+.env.local
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
