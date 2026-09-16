@@ -75,6 +75,7 @@ Sirius 不直接调用任何模型供应商，不引入供应商 SDK，代码里
 | [docs/conventions.md](docs/conventions.md) | Go / Vue / API 编码约定、提交规范、文档规范 |
 | [docs/llm-amkr.md](docs/llm-amkr.md) | AMKR 接入全部细则：客户端、任务路由、超时、WebUI 反代、部署 |
 | [docs/roadmap.md](docs/roadmap.md) | 反目标、MVP 范围与验收标准、待定项 |
+| [docs/prior-art.md](docs/prior-art.md) | 同类项目调研：可借鉴的检索/反思/裁决逻辑、已知失败模式 |
 
 ---
 
