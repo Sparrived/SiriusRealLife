@@ -228,6 +228,8 @@ func TestConditionTriggersFireOnce(t *testing.T) {
 		// working：Until 看精力（< 30），MaxTick=12。
 		a.Current = "working"
 		a.enteredAt = a.Now
+		// 检查点放在过去：dwell 因此**持续**成立，正好用来验证它也被去重。
+		a.decideAt = a.Now
 		a.Mood.Energy = 10 // Until 恒真
 
 		n := 0
@@ -242,12 +244,20 @@ func TestConditionTriggersFireOnce(t *testing.T) {
 		return n
 	}
 
-	// 跑 50 tick（远超 MaxTick=12），每个条件都只该报一次。
-	if got := count(TriggerUntil, 50); got != 1 {
-		t.Errorf("Until 在条件持续成立时报了 %d 次，期望 1 次（上升沿）", got)
-	}
-	if got := count(TriggerMax, 50); got != 1 {
-		t.Errorf("MaxTick 在条件持续成立时报了 %d 次，期望 1 次（上升沿）", got)
+	// 跑 50 tick（远超 MaxTick=12），三个条件都只该报一次。
+	// dwell 是这里最容易漏的一个：decideAt 要等 commit 才推进，而一次
+	// 决策要跨好几个 tick，所以它同样会逐 tick 重复成立。
+	for _, tc := range []struct {
+		kind TriggerKind
+		name string
+	}{
+		{TriggerDwell, "检查点"},
+		{TriggerUntil, "Until"},
+		{TriggerMax, "MaxTick"},
+	} {
+		if got := count(tc.kind, 50); got != 1 {
+			t.Errorf("%s 在条件持续成立时报了 %d 次，期望 1 次（上升沿）", tc.name, got)
+		}
 	}
 }
 

@@ -73,7 +73,11 @@ func (a *Agent) due() []Trigger {
 		return nil
 	}
 	var out []Trigger
-	if a.Now >= a.decideAt {
+	// 检查点也是**条件**，不是事件：decideAt 要等 commitStay/commitEnter
+	// 才推进，而一次决策要跨好几个 tick（LLM 得先回话）。这期间它每个
+	// tick 都成立，因此同样按上升沿去重——否则 pending 里会攒下十几条
+	// 一模一样的话，模型看到一堆重复的"到点了"。
+	if risingEdge(a.Now >= a.decideAt, &a.dwellReported) {
 		out = append(out, Trigger{
 			Kind: TriggerDwell,
 			Text: fmt.Sprintf("上次说好 %d tick 后再问你，现在到点了。", a.decideAt-a.enteredAt),
@@ -81,9 +85,7 @@ func (a *Agent) due() []Trigger {
 		})
 	}
 
-	// Until：只在"由不成立变为成立"时报一次。
-	if until := s.Until != nil && s.Until(a); until && !a.untilReported {
-		a.untilReported = true
+	if risingEdge(s.Until != nil && s.Until(a), &a.untilReported) {
 		// 理由要说**具体**，不能只说"该结束了"：模型得知道是什么迹象，
 		// 才能判断该不该当真。而 Until 只是一个 bool，说不出原因，因此
 		// 这里补上框架**确实知道**的事实——待了多久、安静了多久。
@@ -95,14 +97,9 @@ func (a *Agent) due() []Trigger {
 			text += fmt.Sprintf("而且最近 %d tick 都没有新消息。", quiet)
 		}
 		out = append(out, Trigger{Kind: TriggerUntil, Text: text, At: a.Now})
-	} else if !until {
-		// 条件不再成立：重新武装，下次由假变真时还能报。
-		a.untilReported = false
 	}
 
-	// MaxTick：同样是条件，同样只在上升沿报一次。
-	if maxed := a.Now >= a.enteredAt+s.MaxTick; maxed && !a.maxReported {
-		a.maxReported = true
+	if risingEdge(a.Now >= a.enteredAt+s.MaxTick, &a.maxReported) {
 		out = append(out, Trigger{
 			Kind: TriggerMax,
 			Text: fmt.Sprintf("已经在「%s」待了 %d tick，到上限了，必须做个决定。",
@@ -111,6 +108,24 @@ func (a *Agent) due() []Trigger {
 		})
 	}
 	return out
+}
+
+// risingEdge 实现"条件由假变真时报一次"：cond 为真且上次不为真时返回
+// true 并记下已报；cond 为假时重新武装，下次再变真还能报。
+//
+// 抽成一个函数是因为这条规则对**每个**决策入口都一样，而漏掉任何一个
+// 的后果都很重（见 Agent 里三个 Reported 字段的说明）。R11 说"加一个
+// 入口只准往 pending 追加一条理由"——这个函数就是那条理由该怎么追加。
+func risingEdge(cond bool, reported *bool) bool {
+	if !cond {
+		*reported = false
+		return false
+	}
+	if *reported {
+		return false
+	}
+	*reported = true
+	return true
 }
 
 // consider 在决策点问一次 LLM（R4：异步，不阻塞 tick）。
@@ -225,6 +240,8 @@ func (a *Agent) inMenu(name StateName) bool {
 // commitStay 决定继续留在当前状态，并定下下次询问的时刻。
 func (a *Agent) commitStay(want Tick, why string) {
 	ticks := a.clampTicks(a.Current, want)
+	// 不需要手动清 dwellReported：decideAt 一定被推到未来（ticks >= MinTick），
+	// 条件随即变假，risingEdge 会在下个 tick 自动重新武装。
 	a.decideAt = a.Now + ticks
 	a.pending = nil
 	a.lastRecord = a.stayRecord(why, ticks)

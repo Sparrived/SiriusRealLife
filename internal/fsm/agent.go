@@ -109,20 +109,24 @@ type Agent struct {
 	// 时刻，用 0 当哨兵会让"开局一直没人说话"被误判成"刚刚有消息"。
 	lastMessageAt  Tick
 	everGotMessage bool
-	// untilReported / maxReported 让"条件型"理由只报**一次**。
+	// untilReported / maxReported / dwellReported 让"条件型"理由只报**一次**。
 	//
-	// 为什么必须有：Until 与 MaxTick 是**条件**，不是**事件**。条件一旦
-	// 成立就会一直成立（"刷够 8 tick 了"不会自己变回去、"已到硬上限"
-	// 更不会），于是 due() 每 tick 都重新报一次，决策点被连续触发——
+	// 为什么必须有：这三者都是**条件**，不是**事件**。条件一旦成立就会
+	// 一直成立，于是 due() 每 tick 都重新报一次，决策点被连续触发——
 	// LLM 说的 for_ticks 完全失效，退化成每 2~3 tick 问一次。
 	//
 	// 实测线上就是如此：85 次决策的相邻间隔中位数是 3，而模型填的
 	// for_ticks 是 12。每次询问都是一次真金白银的 LLM 调用。
 	//
+	// dwell 尤其容易被忽略：decideAt 要等 commit 才推进，而一次决策
+	// 要跨好几个 tick（LLM 得先回话），所以"到点了"在这期间也持续成立，
+	// 会把 pending 塞满十几条一模一样的话。
+	//
 	// 语义是**上升沿**：条件由假变真时报一次，之后闭麦；条件变回假、
-	// 再变真时才会报第二次。进入新状态时清零。
+	// 再变真时才会报第二次。推进检查点与进入新状态时全部清零。
 	untilReported bool
 	maxReported   bool
+	dwellReported bool
 	cooldownUntil map[StateName]Tick
 	events        chan Event
 	chatter       Chatter
@@ -348,9 +352,10 @@ func (a *Agent) enter(name StateName, reason, why string, forTicks Tick) {
 	a.enteredAt = a.Now
 	a.decideAt = a.Now + forTicks
 	// 新状态的条件型理由重新武装：上一个状态的 Until/Max 成立与否
-	// 与这个状态无关。
+	// 与这个状态无关；检查点也是全新的。
 	a.untilReported = false
 	a.maxReported = false
+	a.dwellReported = false
 
 	if s := a.states[name]; s.OnEnter != nil {
 		s.OnEnter(a)
