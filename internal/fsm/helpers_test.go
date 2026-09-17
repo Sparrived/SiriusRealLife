@@ -22,6 +22,8 @@ func (r *recordingSink) Accept(m IncomingMessage) { r.got = append(r.got, m) }
 type fakeAttention struct {
 	msgs   []string
 	cursor int
+	// mentions 是"未读里提到我的条数"，供 @ 相关断言使用。
+	mentions int
 }
 
 func (f *fakeAttention) Scan(n int) []string {
@@ -40,6 +42,12 @@ func (f *fakeAttention) Scan(n int) []string {
 func (f *fakeAttention) Browse(n int) []string { return nil }
 
 func (f *fakeAttention) Unread() int { return len(f.msgs) - f.cursor }
+
+// UnreadMentions 让 fake 可指定"其中几条提到了我"。
+//
+// 默认 0：大多数测试关心的是"未读条数"，不是 @ 的显眼程度。
+// 需要验证 @ 的测试显式设置它。
+func (f *fakeAttention) UnreadMentions() int { return f.mentions }
 
 // newAgentWithFakeAttention 造一个接了 fakeAttention 的 agent，
 // 队列里预置两条消息。返回的清理函数用于消掉后台独白 goroutine。

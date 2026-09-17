@@ -244,6 +244,27 @@ func (s *Store) UnreadCount() int {
 	return n
 }
 
+// UnreadMentions 返回未读里"提到我"的条数（@我 或回复我）。
+//
+// 与 UnreadCount 一样**不受可见性门控**：这是"手机上有一条在叫我"
+// 这个事实，不是消息内容。它必须能在没看手机时被知道——否则模型只
+// 看到"还有 5 条没看"，看不出其中一条是专门叫她的，"要不要去看看"
+// 就少了一半依据（memory.md §2.1 的"更显眼"）。
+//
+// 这两类在**看到内容时**还会被 formatMessage 标出来；本方法是它们
+// 在**没看到内容时**的唯一痕迹。
+func (s *Store) UnreadMentions() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, m := range s.messages {
+		if m.ID > s.cursor && (m.MentionsMe || m.RepliesToMe) {
+			n++
+		}
+	}
+	return n
+}
+
 // Dropped 返回因溢出被丢弃的条数。
 func (s *Store) Dropped() int {
 	s.mu.RLock()

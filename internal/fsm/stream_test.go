@@ -230,6 +230,31 @@ func TestContextReportsUnread(t *testing.T) {
 	}
 }
 
+// TestContextReportsUnreadMentions 验证 @ 在没看手机时也有痕迹。
+//
+// 这是用户明确要求复刻的 QQ 语义："@ 和回复这两种模式在 QQ 中的反应
+// 就是会显式提醒到用户有人提及你，而一般消息没有专门的提及"。
+//
+// 抢占取消后（R12），@ 与普通消息的**唯一**差别必须在某处落地。
+// 若只报"还有 N 条没看"，那么"其中一条是专门叫你的"就丢了——
+// 模型没法把"有人叫我"和"群里又在灌水"区分开，@ 等于不存在。
+func TestContextReportsUnreadMentions(t *testing.T) {
+	a, quit := newAgentWithFakeAttention(t)
+	defer quit()
+
+	// 默认没有提及：不该凭空写出"提到了你"。
+	if got := a.Context(SiteDispatch, ContextOptions{}); strings.Contains(got, "提到了你") {
+		t.Errorf("没有被 @ 时不该报告提及：\n%s", got)
+	}
+
+	// 有 1 条 @我：必须显式点出来。
+	a.attention.(*fakeAttention).mentions = 1
+	got := a.Context(SiteDispatch, ContextOptions{})
+	if !strings.Contains(got, "【手机】") || !strings.Contains(got, "提到了你") {
+		t.Errorf("@我的消息应当在【手机】段里被显式点出：\n%s", got)
+	}
+}
+
 // TestContextRespectsLimits 验证每段都有上限（R5）。
 func TestContextRespectsLimits(t *testing.T) {
 	a := newTestAgent(t, fakeChatter{})

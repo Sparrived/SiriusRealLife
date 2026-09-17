@@ -133,6 +133,48 @@ func TestReadPhoneWithNoMessages(t *testing.T) {
 	}
 }
 
+// TestMentionAndReplyAreMarkedInContent 验证"显式提醒有人提及你"。
+//
+// 这是用户明确要求复刻的 QQ 语义：**@ 与回复不打断她手上的事**，
+// 但在她看手机时，这两类会**显眼地被标出来**——现实里 QQ 给这两类
+// 弹通知、带红字，普通群消息只有一个红点数字（R12 / memory.md §2.1）。
+//
+// 差别落在**内容**上，不落在控制流上：`formatMessage` 是唯一把消息
+// 渲染给模型看的地方，因此标记加在这里天然覆盖 Scan / Browse /
+// Pump / ReadPhone 所有可见路径，不会漏。
+//
+// 这条守的是"文档说了但代码没做"：§2.1 写了"前两类在 prompt 里被
+// 显式标出来"，而 formatMessage 曾经只拼 `发送者: 正文`，
+// MentionsMe/RepliesToMe 完全没被读过——于是"更显眼"只剩重要性打分，
+// 而模型在正文里看不出这条是在叫她。
+func TestMentionAndReplyAreMarkedInContent(t *testing.T) {
+	a, store := newAgentWithStore(t, "scrolling_phone")
+	store.Ingest(Message{From: "张三", Text: "在吗", MentionsMe: true})
+	store.Ingest(Message{From: "李四", Text: "怎么说", RepliesToMe: true})
+	store.Ingest(Message{From: "王五", Text: "今天天气不错"})
+
+	a.ReadPhone(5)
+	got := streamText(a)
+
+	// @ 与回复必须显式标出"提到了你 / 回复了你"。
+	if !strings.Contains(got, "提到") {
+		t.Errorf("@我的消息应当在内容里标出『提到』，实际：%s", got)
+	}
+	if !strings.Contains(got, "回复") {
+		t.Errorf("回复我的消息应当在内容里标出『回复』，实际：%s", got)
+	}
+	// 普通消息不该被标记：两者都标就等于没标。
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "天气") && (strings.Contains(line, "提到") || strings.Contains(line, "回复")) {
+			t.Errorf("普通消息不该带提及标记：%s", line)
+		}
+	}
+	// 正文本身仍要原样保留（标记是补充，不是替换）。
+	if !strings.Contains(got, "今天天气不错") {
+		t.Errorf("正文应当原样保留，实际：%s", got)
+	}
+}
+
 // TestAgentRunsWithoutAttention 验证未接 Attention 时不 panic（离线场景）。
 func TestAgentRunsWithoutAttention(t *testing.T) {
 	a, err := fsm.New(fsm.Options{

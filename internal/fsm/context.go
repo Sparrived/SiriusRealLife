@@ -124,7 +124,14 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 	// 订阅了 QQ 的状态（如刷手机）里，Pump 已经在 Step 里把消息泵走、
 	// 游标随之推进，因此这里自然为 0、整段不出现——不必特殊处理。
 	if n := a.Unread(); n > 0 {
-		fmt.Fprintf(&b, "【手机】还有 %d 条消息没看。\n", n)
+		fmt.Fprintf(&b, "【手机】还有 %d 条消息没看。", n)
+		// @我 与回复我单独点出来：这两种在 QQ 里会弹通知，普通群消息
+		// 只有一个红点数字。它们不抢占状态（R12），因此"更显眼"只能
+		// 落在**理由**上——不说这一句，@ 在没看手机时就等于不存在。
+		if m := a.UnreadMentions(); m > 0 {
+			fmt.Fprintf(&b, "其中 %d 条提到了你。", m)
+		}
+		b.WriteString("\n")
 	}
 
 	if len(opt.SelfModel) > 0 {

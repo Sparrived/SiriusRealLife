@@ -681,6 +681,15 @@ func TestAcceptanceHTTPMessageReachesMemory(t *testing.T) {
 		t.Error("@ 不该把 agent 拉到看 QQ 状态（抢占已取消）")
 	}
 
+	// @ 在"还没看手机"时必须已有痕迹：这是它与普通消息的唯一差别。
+	// 抢占取消后，若这里也是 0，@ 与灌水就完全等价了。
+	if got := h.store.UnreadMentions(); got != 1 {
+		t.Errorf("未读里的提及数 = %d, 期望 1（@ 没有留下任何痕迹）", got)
+	}
+	if got := h.agent.Context(fsm.SiteDispatch, fsm.ContextOptions{}); !strings.Contains(got, "提到了你") {
+		t.Errorf("@ 应当在决策上下文里被显式点出，实际:\n%s", got)
+	}
+
 	// 正文只在订阅 QQ 的状态里才可见：手动切过去，由 ReadPhone 走
 	// 可见性门控读出——这同时反证消息确实存进了记忆层。
 	h.agent.Current = "scrolling_phone"

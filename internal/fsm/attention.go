@@ -30,6 +30,13 @@ type Attention interface {
 	Browse(n int) []string
 	// Unread 返回未读条数。它是心境输入（99+ 推高"烦躁"，§2.2）。
 	Unread() int
+	// UnreadMentions 返回未读里"提到我"的条数（@我 或回复我）。
+	//
+	// 必须与 Unread 分开：真人手机上"有 5 条未读"和"有 5 条未读、
+	// 其中 1 条在叫我"是两种不同的处境。@ 不抢占状态（R12），
+	// 它唯一能起作用的地方就是**让这次决策的理由更显眼**——而理由
+	// 里少了"有人叫我"，@ 在没看手机时就等于不存在。
+	UnreadMentions() int
 }
 
 // defaultFeedLimit 是单次泵入的条数上限。
@@ -118,6 +125,19 @@ func (a *Agent) Unread() int {
 		return 0
 	}
 	return a.attention.Unread()
+}
+
+// UnreadMentions 返回未读里"提到我"的条数（@我 或回复我）。
+//
+// 与 Unread 同样不受可见性门控：这是事实（"有人在叫我"），不是内容。
+// 它是 @ 在"她正在忙、还没看手机"这段窗口里唯一的存在形式——
+// 下一次决策点会把"有 N 条未读、其中 M 条提到了你"作为理由摆给模型
+// （R12：消息不触发决策，但可以改变**下一次决策的理由**）。
+func (a *Agent) UnreadMentions() int {
+	if a.attention == nil {
+		return 0
+	}
+	return a.attention.UnreadMentions()
 }
 
 // QuietFor 返回"距离上一条消息过了多少 tick"。

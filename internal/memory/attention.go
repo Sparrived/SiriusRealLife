@@ -36,11 +36,28 @@ func (s *Store) Unread() int { return s.UnreadCount() }
 // formatMessage 把一条消息渲染成给 LLM 看的文本。
 //
 // 带上发送者：群里"谁说的"是理解上下文的关键。
+//
+// @我 与回复我要**显式标出来**（memory.md §2.1）：QQ 里这两类会弹通知、
+// 带红字，普通群消息只有一个红点数字。既然抢占已取消（R12），
+// "更显眼"就只剩两处能落地——入队时的 Importance 打分（淘汰优先级，
+// 模型看不到）和**这里**。
+//
+// 标记加在这个函数里，天然覆盖所有可见路径（Scan / Browse / Pump /
+// ReadPhone），不会出现"某条路径忘了标"。它是**正文的补充而不是替换**：
+// 模型仍需要看到原话。
 func formatMessage(m Message) string {
-	if m.From != "" {
-		return m.From + ": " + m.Text
+	tag := ""
+	switch {
+	case m.MentionsMe:
+		tag = "（提到了你）"
+	case m.RepliesToMe:
+		tag = "（回复了你）"
 	}
-	return m.Text
+	body := m.Text
+	if m.From != "" {
+		body = m.From + ": " + m.Text
+	}
+	return tag + body
 }
 
 // Accept 实现 fsm.MessageSink：把一条外部消息收进 unread 队列。
