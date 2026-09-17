@@ -25,8 +25,11 @@ func NewChatter(client *Client, site CallSite) *Chatter {
 }
 
 // Chat 实现 fsm.Chatter。
+//
+// 直接透传 ChatResponse：工具调用的解析在客户端做（那是协议形状），
+// 这里不加工——适配层只负责错误归类与依赖方向。
 func (c *Chatter) Chat(ctx context.Context, req fsm.ChatRequest) (fsm.ChatResponse, error) {
-	text, err := c.client.Complete(ctx, req)
+	resp, err := c.client.Complete(ctx, req)
 	if err != nil {
 		// 503：当作可降级错误处理，不立刻重试。
 		if se, ok := err.(*StatusError); ok && se.Unavailable() && c.OnDegrade != nil {
@@ -34,5 +37,5 @@ func (c *Chatter) Chat(ctx context.Context, req fsm.ChatRequest) (fsm.ChatRespon
 		}
 		return fsm.ChatResponse{}, fmt.Errorf("llm[%s]: %w", c.site, err)
 	}
-	return fsm.ChatResponse{Text: text}, nil
+	return resp, nil
 }

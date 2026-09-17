@@ -39,6 +39,11 @@ type ChatRequest struct {
 	// 见 parseMonologue。客户端不能假设路由支持它——路由是 AMKR 侧
 	// 决定的，可以随时切（R9）。
 	Schema *ResponseSchema
+	// Tools 是本次调用允许的工具（空 = 纯文本调用）。
+	//
+	// 用"每次调用显式给出"而不是"全局注册表"：工具可见性随状态变化
+	// （R7 修订），而全局注册表只能表达"所有调用看到同一套"。
+	Tools []ToolSpec
 }
 
 // ResponseSchema 描述一次结构化输出的期望形状。
@@ -55,6 +60,12 @@ type ResponseSchema struct {
 // ChatResponse 是一次 LLM 调用的结果。
 type ChatResponse struct {
 	Text string
+	// ToolCalls 是模型决定调用的工具（可能为空）。
+	//
+	// 与 Text 可以同时非空：实测模型会一边叙述（"有点无聊，看看手机"）
+	// 一边给出工具调用。叙述进意识流，工具调用才改变世界——两者都要，
+	// 不能二选一。
+	ToolCalls []ToolCall
 }
 
 // Chatter 是 LLM 调用的唯一缝口。

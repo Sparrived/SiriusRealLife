@@ -89,6 +89,20 @@ type chatRequest struct {
 	// 散文（HTTP 200，不报错），所以调用方必须能接受非 JSON 回复——
 	// 我们请求它，但不依赖它（R9：路由由 AMKR 侧决定，可随时切）。
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	// Tools 仅在本次调用带工具时出现。
+	Tools []wireTool `json:"tools,omitempty"`
+}
+
+// wireTool 是 OpenAI 的工具声明形状：多一层 "type":"function" 包装。
+type wireTool struct {
+	Type     string       `json:"type"`
+	Function wireFunction `json:"function"`
+}
+
+type wireFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // responseFormat 是 OpenAI 的结构化输出参数。
@@ -107,16 +121,35 @@ type jsonSchemaSpec struct {
 	Schema json.RawMessage `json:"schema"`
 }
 
+// chatMessage 是 OpenAI 的请求消息形状。
+//
+// 只有 role/content：决策是单轮调用（见 toWireMessages），不需要
+// assistant/tool 的历史回放，因此不声明 tool_calls/tool_call_id。
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// wireToolCall 是 OpenAI 的工具调用形状。
+//
+// Arguments 是**字符串**而不是对象——这是协议里最容易写错的一处：
+// 它是一段 JSON 文本，需要二次解析。用 string 接收再转 RawMessage，
+// 不能直接声明成 RawMessage（否则 json 包会因为类型不符而报错）。
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type chatResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string         `json:"content"`
+			ToolCalls []wireToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -127,27 +160,54 @@ type chatResponse struct {
 	} `json:"usage"`
 }
 
+// toWireMessages 把一句话 prompt 包成线上消息。
+//
+// 只发一条 user：决策是**单轮**的——模型要么调 stay 要么调
+// enter_state，工具的效果在框架内部生效，没有需要回传的工具结果。
+// 等真有需要看结果的工具（如 read_app）时再加多轮。
+func toWireMessages(prompt string) []chatMessage {
+	return []chatMessage{{Role: "user", Content: prompt}}
+}
+
+// toWireTools 把工具声明翻成线上形状。
+func toWireTools(specs []fsm.ToolSpec) []wireTool {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]wireTool, 0, len(specs))
+	for _, s := range specs {
+		out = append(out, wireTool{
+			Type: "function",
+			Function: wireFunction{
+				Name: s.Name, Description: s.Description, Parameters: s.Parameters,
+			},
+		})
+	}
+	return out
+}
+
 // Complete 发一次非流式对话请求。
 //
 // **不重试**（R10）：重试、切 Key、冷却全部由 AMKR 负责，
 // 客户端重试等于双倍计费 + 日志噪音。
 //
 // 参数名用 chat 而不是 req：下面要构造 *http.Request，同名会遮蔽。
-func (c *Client) Complete(ctx context.Context, chat fsm.ChatRequest) (string, error) {
+func (c *Client) Complete(ctx context.Context, chat fsm.ChatRequest) (fsm.ChatResponse, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:          c.cfg.Model,
-		Messages:       []chatMessage{{Role: "user", Content: chat.Prompt}},
+		Messages:       toWireMessages(chat.Prompt),
 		Stream:         false,
 		ResponseFormat: responseFormatOf(chat.Schema),
+		Tools:          toWireTools(chat.Tools),
 	})
 	if err != nil {
-		return "", fmt.Errorf("llm: 序列化请求: %w", err)
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 序列化请求: %w", err)
 	}
 
 	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("llm: 构造请求: %w", err)
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 构造请求: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.cfg.APIKey != "" {
@@ -156,28 +216,56 @@ func (c *Client) Complete(ctx context.Context, chat fsm.ChatRequest) (string, er
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("llm: 调用 AMKR: %w", err)
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 调用 AMKR: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// 读有界：错误响应不该把内存吃光。
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("llm: 读取响应: %w", err)
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 读取响应: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", &StatusError{Code: resp.StatusCode, Body: truncate(string(raw), 500)}
+		return fsm.ChatResponse{}, &StatusError{Code: resp.StatusCode, Body: truncate(string(raw), 500)}
 	}
 
 	var out chatResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("llm: 解析响应: %w（原文 %s）", err, truncate(string(raw), 200))
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 解析响应: %w（原文 %s）", err, truncate(string(raw), 200))
 	}
 	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("llm: 响应没有 choices（model=%s）", out.Model)
+		return fsm.ChatResponse{}, fmt.Errorf("llm: 响应没有 choices（model=%s）", out.Model)
 	}
-	return out.Choices[0].Message.Content, nil
+	msg := out.Choices[0].Message
+	return fsm.ChatResponse{
+		Text:      msg.Content,
+		ToolCalls: decodeToolCalls(msg.ToolCalls),
+	}, nil
+}
+
+// decodeToolCalls 把线上工具调用翻成 fsm 形状。
+//
+// 空 arguments 补成 "{}"：上游给空串是常见行为（无参工具），
+// 而下游工具拿到空 RawMessage 会解析失败。在这里补一次，
+// 好过让每个工具各自防一遍。
+func decodeToolCalls(in []wireToolCall) []fsm.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]fsm.ToolCall, 0, len(in))
+	for _, c := range in {
+		args := c.Function.Arguments
+		if strings.TrimSpace(args) == "" {
+			args = "{}"
+		}
+		out = append(out, fsm.ToolCall{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: json.RawMessage(args),
+		})
+	}
+	return out
 }
 
 // StatusError 是 AMKR 返回非 200 时的错误。

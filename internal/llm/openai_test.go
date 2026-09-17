@@ -87,12 +87,169 @@ func TestCompleteSendsForbiddenFreeParams(t *testing.T) {
 // TestCompleteParsesContent 验证正常响应能取出文本。
 func TestCompleteParsesContent(t *testing.T) {
 	c, _ := newTestClient(t, okResponse("我在刷手机"))
-	text, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "你在做什么"})
+	resp, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "你在做什么"})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if text != "我在刷手机" {
-		t.Fatalf("text = %q", text)
+	if resp.Text != "我在刷手机" {
+		t.Fatalf("text = %q", resp.Text)
+	}
+}
+
+// TestToolsAreSentInOpenAIShape 锁住工具声明的线上形状。
+//
+// OpenAI 要求多一层 {"type":"function","function":{...}} 包装。
+// 少这层不会编译报错，只会在上游得到一个 400——正是需要测试盯住的地方。
+func TestToolsAreSentInOpenAIShape(t *testing.T) {
+	var got map[string]any
+	done := make(chan struct{})
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		close(done)
+		okResponse("收到")(w, r)
+	})
+
+	_, err := c.Complete(context.Background(), fsm.ChatRequest{
+		Prompt: "现在做什么",
+		Tools: []fsm.ToolSpec{{
+			Name:        "stay",
+			Description: "什么都不做",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	<-done
+
+	tools, _ := got["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools 应有 1 项，实际 %d（原文 %v）", len(tools), got["tools"])
+	}
+	tool := tools[0].(map[string]any)
+	if tool["type"] != "function" {
+		t.Errorf(`tools[0].type = %v, 期望 "function"`, tool["type"])
+	}
+	fn, ok := tool["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0].function 缺失或形状不对: %v", tool)
+	}
+	if fn["name"] != "stay" {
+		t.Errorf("function.name = %v", fn["name"])
+	}
+	if _, present := fn["parameters"]; !present {
+		t.Error("function.parameters 应存在")
+	}
+}
+
+// TestNoToolsFieldWhenAbsent 验证不带工具时**不出现** tools 字段。
+//
+// 与 response_format 同理：AMKR 有些任务对多余参数敏感，
+// 一个空的 tools 数组会把普通调用变成工具调用。
+func TestNoToolsFieldWhenAbsent(t *testing.T) {
+	var got map[string]any
+	done := make(chan struct{})
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		close(done)
+		okResponse("收到")(w, r)
+	})
+
+	if _, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	<-done
+	if _, present := got["tools"]; present {
+		t.Errorf("未带工具时不该出现 tools 字段: %v", got["tools"])
+	}
+}
+
+// TestParseToolCalls 验证工具调用能被解析出来。
+//
+// 两个易错点：arguments 是**字符串**需要二次解码；content 与 tool_calls
+// 可以同时非空（模型边叙述边调工具），两者都不能丢。
+func TestParseToolCalls(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "up",
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"content": "有点无聊，看看手机",
+					"tool_calls": []map[string]any{{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "enter_state",
+							"arguments": `{"state":"scrolling_phone","for_ticks":20}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+		})
+	})
+
+	resp, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// 叙述不能被丢掉：它要进意识流。
+	if resp.Text != "有点无聊，看看手机" {
+		t.Errorf("Text = %q", resp.Text)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("应有 1 次工具调用，实际 %d", len(resp.ToolCalls))
+	}
+	tc := resp.ToolCalls[0]
+	if tc.Name != "enter_state" {
+		t.Errorf("Name = %q", tc.Name)
+	}
+	var args struct {
+		State    string `json:"state"`
+		ForTicks int    `json:"for_ticks"`
+	}
+	if err := json.Unmarshal(tc.Arguments, &args); err != nil {
+		t.Fatalf("Arguments 不是合法 JSON（%s）: %v", tc.Arguments, err)
+	}
+	if args.State != "scrolling_phone" || args.ForTicks != 20 {
+		t.Errorf("参数解析错: %+v", args)
+	}
+}
+
+// TestEmptyToolArgumentsBecomeEmptyObject 验证空 arguments 补成 "{}"。
+//
+// 无参工具（stay 的某些形状）上游会回空串。若原样传下去，
+// 每个工具都得自己防一次"空 JSON"——在这里补一次更省。
+func TestEmptyToolArgumentsBecomeEmptyObject(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "up",
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"tool_calls": []map[string]any{{
+						"id": "call_1", "type": "function",
+						"function": map[string]any{"name": "stay", "arguments": ""},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+		})
+	})
+
+	resp, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("应有 1 次调用")
+	}
+	got := string(resp.ToolCalls[0].Arguments)
+	if got != "{}" {
+		t.Errorf("空 arguments 应补成 {}，实际 %q", got)
 	}
 }
 

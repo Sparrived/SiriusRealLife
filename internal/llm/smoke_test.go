@@ -40,14 +40,14 @@ func TestSmokeAgainstRealAMKR(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	text, err := c.Complete(ctx, fsm.ChatRequest{Prompt: "只回复两个字：收到"})
+	resp, err := c.Complete(ctx, fsm.ChatRequest{Prompt: "只回复两个字：收到"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Complete 失败: %v", err)
 	}
 	// 延迟是设计输入：thinking 状态的 maxTick 要按它估（实测 1.8–3.4s）。
-	t.Logf("延迟 %v，回复 %q", elapsed, text)
-	if text == "" {
+	t.Logf("延迟 %v，回复 %q", elapsed, resp.Text)
+	if resp.Text == "" {
 		t.Fatal("回复为空")
 	}
 }
