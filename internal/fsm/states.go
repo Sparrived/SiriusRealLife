@@ -1,5 +1,16 @@
 package fsm
 
+// workEnergyPerTick 是"干活"每个 tick 的精力成本。
+//
+// 与状态的基础衰减叠加：基础衰减 100/1200 表示"活着就消耗"，
+// 这里表示"干活额外消耗"。取 0.02/1 时，一天干约 540 tick 的活
+// 额外消耗约 11 点——量级刻意小于基础衰减，因为 MVP 的"工作"
+// 只是坐在那里，不该比活着本身贵好几倍。
+//
+// 这个数字与 DefaultMoodRates().Energy 共同决定精力能否收支平衡
+// （唯一回复手段是睡觉）。调任何一边都要重跑 TestMoodEconomyBalanced。
+const workEnergyPerTick = 0.02
+
 // MVPStates 返回 MVP 的四个状态（见 docs/roadmap.md §2）。
 //
 // QQ 可见性：只有 scrolling_phone 能看到 QQ 消息。其余状态消息静默入队。
@@ -43,7 +54,12 @@ func MVPStates() []State {
 			Suggests: []string{"工作", "写东西"},
 			OnEnter: func(a *Agent) {
 				a.appendStream("开始干活")
-				a.Mood.Energy -= 5
+				// 成本与**这次要干多久**成正比，而不是每次扣一个固定值。
+				// 固定值曾经让精力长期为 0：working 一天要进入几十次，
+				// 每次扣 5 就是几百点，与"实际工作了多久"毫无关系。
+				// 见 TestMoodEconomyBalanced。
+				cost := workEnergyPerTick * float64(a.PlannedDuration())
+				a.Mood.Energy -= cost
 				a.Mood.Clamp()
 			},
 		},

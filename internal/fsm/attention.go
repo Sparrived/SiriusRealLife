@@ -2,6 +2,18 @@ package fsm
 
 import "fmt"
 
+// Ticker 由需要跟随时间前进的组件实现（当前是 memory.Store）。
+//
+// 与 Attention 同样定义在 fsm 侧以避免 import 成环，由 memory.Store 隐式满足。
+//
+// 为什么必须存在：记忆的强度衰减、升格、遗忘全按 tick 判定（R8），
+// 如果没人驱动它，这些机制在真实运行的系统里根本不会发生——
+// 单元测试各自通过、装起来记忆却永不遗忘，是很容易漏掉的一类缺口。
+type Ticker interface {
+	// Tick 前进到指定 tick 序号。
+	Tick(now Tick)
+}
+
 // Attention 是"看 QQ"这个动作需要的全部能力。
 //
 // 为什么在这里定义接口：memory 包已经 import fsm（它用 fsm.Tick），

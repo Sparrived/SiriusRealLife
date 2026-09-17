@@ -43,5 +43,12 @@ func formatMessage(m Message) string {
 	return m.Text
 }
 
-// 编译期断言：Store 必须满足 fsm.Attention。
-var _ fsm.Attention = (*Store)(nil)
+// 编译期断言：Store 必须满足 fsm.Attention 与 fsm.Ticker。
+//
+// Ticker 就是 Store.Tick —— 让 agent 的 tick 循环驱动记忆的
+// 衰减/升格/遗忘。没有这条断言，很容易出现"单测都过、装起来
+// 记忆永不遗忘"的缺口。
+var (
+	_ fsm.Attention = (*Store)(nil)
+	_ fsm.Ticker    = (*Store)(nil)
+)

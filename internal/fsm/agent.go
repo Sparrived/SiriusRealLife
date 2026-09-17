@@ -69,6 +69,8 @@ type Agent struct {
 	thinking      context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
 	observe       func(Snapshot)
 	attention     Attention
+	ticker        Ticker
+	moodRates     MoodRates
 }
 
 // Options 是构造 Agent 的参数。种子显式传入使 30-tick 验收可复现（R3）。
@@ -92,6 +94,11 @@ type Options struct {
 	// Attention 提供"看 QQ"所需的读取能力。为 nil 时进入
 	// scrolling_phone 不会读到任何消息（离线测试用）。
 	Attention Attention
+	// Ticker 在每个 tick 后被驱动一次，让记忆层跟着时间前进。
+	// 为 nil 时不驱动。见 attention.go 里 Ticker 的说明。
+	Ticker Ticker
+	// MoodRates 是心境衰减率。零值用 DefaultMoodRates()。
+	MoodRates MoodRates
 }
 
 // Snapshot 是 agent 状态的值快照。
@@ -158,6 +165,13 @@ func New(opt Options) (*Agent, error) {
 		return nil, fmt.Errorf("fsm: 初始状态不存在: %s", initial)
 	}
 
+	rates := opt.MoodRates
+	// 三项全为 0 视为"未设置"，用默认值。允许显式传部分为 0
+	// （例如只想要烦躁不衰减）。
+	if rates == (MoodRates{}) {
+		rates = DefaultMoodRates()
+	}
+
 	a := &Agent{
 		Name:          opt.Name,
 		states:        states,
@@ -170,6 +184,8 @@ func New(opt Options) (*Agent, error) {
 		cooldownUntil: map[StateName]Tick{},
 		observe:       opt.Observe,
 		attention:     opt.Attention,
+		ticker:        opt.Ticker,
+		moodRates:     rates,
 		Mood:          Mood{Energy: 80, Annoyed: 0, Curious: 60},
 	}
 	a.enter(initial, "init")
@@ -181,6 +197,14 @@ func (a *Agent) Events() chan<- Event { return a.events }
 
 // LastRecord 返回最近一次分派记录（R6 日志的内容）。
 func (a *Agent) LastRecord() DispatchRecord { return a.lastRecord }
+
+// PlannedDuration 返回当前状态本次计划的停留时长。
+//
+// 在 OnEnter 里可用：enter() 先算好 dwellUntil 再调 OnEnter，因此
+// 状态的副作用能按"这次要待多久"来定成本，而不是每次进入扣一个
+// 与时长无关的固定值。这点很重要——"干活越久越累"才对，
+// 而 working 一天要进入几十次，固定扣费会让人格长期精疲力尽。
+func (a *Agent) PlannedDuration() Tick { return a.dwellUntil - a.Now }
 
 // enter 进入一个状态：执行 onExit/onEnter、设置停留目标、记冷却。
 func (a *Agent) enter(name StateName, reason string) {
@@ -243,13 +267,14 @@ func (a *Agent) appendStream(text string) {
 }
 
 // decayMood 按 tick 衰减心境（R2：心境自己按时间衰减）。
+//
+// 速率来自 MoodRates（人格参数，见 mood.go）。这里刻意不写字面量：
+// 精力衰减快于"睡觉能补回"的量时，精力会长期钉在 0，
+// 人格就失去"累"的层次。那个平衡由 TestMoodEconomyBalanced 守住。
 func (a *Agent) decayMood() {
-	// 精力从满到空跨一个清醒日：约 960 tick（16 游戏小时）。
-	// 这样"睡一觉"是一天一次的事，而不是每隔几小时就来一次。
-	// 烦躁消退快、好奇消退慢，量级同样按天校准。
-	a.Mood.Energy -= 100.0 / 960.0
-	a.Mood.Annoyed -= 100.0 / 240.0
-	a.Mood.Curious -= 100.0 / 1440.0
+	a.Mood.Energy -= a.moodRates.Energy
+	a.Mood.Annoyed -= a.moodRates.Annoyed
+	a.Mood.Curious -= a.moodRates.Curious
 	a.Mood.Clamp()
 }
 
@@ -260,6 +285,12 @@ func (a *Agent) Step(ctx context.Context) {
 	a.drainEvents(ctx)
 	a.Now++
 	a.decayMood()
+	// 记忆层跟着时间前进（衰减/升格/遗忘全按 tick 判定，R8）。
+	// 放在这里而不是 dispatch 之后：即使本次要换状态，记忆也该按
+	// 新 tick 结算，两者没有先后依赖。
+	if a.ticker != nil {
+		a.ticker.Tick(a.Now)
+	}
 
 	if a.Now >= a.dwellUntil {
 		next, rec, err := a.dispatch()
