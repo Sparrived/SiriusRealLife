@@ -217,7 +217,7 @@ func (a *Agent) commitStay(want Tick, why string) {
 //
 // 返回错误时**不改动任何状态**：调用方负责降级（见 applyDecision）。
 // 校验放在这里而不是只靠 schema 的 enum：模型仍可能回一个不在
-// 候选里的名字（路由忽略 schema 时必然如此），那时必须挡住而不是照做。
+// 候选里的名字（路由忽略 schema 时就会如此），那时必须挡住而不是照做。
 func (a *Agent) commitEnter(name StateName, want Tick, why string) error {
 	if _, ok := a.states[name]; !ok {
 		return fmt.Errorf("fsm: 状态不存在: %s", name)
@@ -267,8 +267,9 @@ func (a *Agent) applyDecision(res llmResult) {
 			return
 		}
 	}
-	// 一个可识别的调用都没有：模型可能只回了散文（路由静默忽略 tools
-	// 时就是这样）。降级为原样再待一会，**绝不**随机挑一个状态。
+	// 一个可识别的调用都没有：模型可能只回了散文（路由不支持 tools
+	// 时就是这样，且**支持与否逐路由不同**）。降级为原样再待一会，
+	// **绝不**随机挑一个状态。
 	a.log.Warn("decision_unusable", "calls", len(res.Calls))
 	a.commitStay(defaultStayTick, "没想清楚要做什么，先按原样待着")
 }
