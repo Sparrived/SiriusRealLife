@@ -26,6 +26,13 @@ type Options struct {
 	AllowOps     bool
 	LogLevel     slog.Level
 	AMKR         llm.Config
+
+	// AllowNonLoopback 为真时允许绑定非回环地址（容器部署必需）。
+	// 由 SIRIUS_ALLOW_NON_LOOPBACK 显式开启，默认关闭。
+	AllowNonLoopback bool
+	// NonLoopbackAcknowledged 表示本次启动**确实**绑在了非回环地址上，
+	// 供 main 打一条显眼的告警。它不是开关，是启动时的自检结果。
+	NonLoopbackAcknowledged bool
 }
 
 // FromEnv 读环境变量并做校验。
@@ -69,6 +76,13 @@ func FromEnv() (Options, error) {
 		}
 		opt.AllowOps = b
 	}
+	if v := strings.TrimSpace(os.Getenv("SIRIUS_ALLOW_NON_LOOPBACK")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Options{}, fmt.Errorf("config: SIRIUS_ALLOW_NON_LOOPBACK 不是布尔值 %q: %w", v, err)
+		}
+		opt.AllowNonLoopback = b
+	}
 	opt.LogLevel = parseLevel(envOr("SIRIUS_LOG_LEVEL", "info"))
 
 	amkr, err := llm.ConfigFromEnv()
@@ -79,10 +93,19 @@ func FromEnv() (Options, error) {
 
 	// 安全线（AGENTS.md §4）：Sirius 自身具备鉴权之前，只能绑回环地址。
 	// --allow-ops 会放行 AMKR 的宿主机运维接口，更不该对外。
+	//
+	// 容器里必须绑 0.0.0.0，否则 Docker 的端口映射转发不进容器。这个
+	// 例外由 SIRIUS_ALLOW_NON_LOOPBACK 显式开启：进程无法知道宿主侧的
+	// 端口映射，所以判断"是否真的只对宿主回环开放"只能靠部署方声明。
+	// 默认关闭，保持 fail-closed。
 	if !isLoopback(opt.Addr) {
-		return Options{}, fmt.Errorf(
-			"config: SIRIUS_ADDR=%q 不是回环地址。Sirius 尚无自身鉴权，且 /amkr/ 等同于 AMKR 完整管理权限，禁止对外监听（AGENTS.md §4）",
-			opt.Addr)
+		if !opt.AllowNonLoopback {
+			return Options{}, fmt.Errorf(
+				"config: SIRIUS_ADDR=%q 不是回环地址。Sirius 尚无自身鉴权，且 /amkr/ 等同于 AMKR 完整管理权限，禁止对外监听（AGENTS.md §4）。"+
+					"容器部署（必须绑 0.0.0.0）请设 SIRIUS_ALLOW_NON_LOOPBACK=1，并把 compose 的端口映射限制在宿主回环（127.0.0.1:8080:8080）",
+				opt.Addr)
+		}
+		opt.NonLoopbackAcknowledged = true
 	}
 	return opt, nil
 }

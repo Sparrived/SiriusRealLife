@@ -32,11 +32,12 @@ func TestFromEnvDefaults(t *testing.T) {
 }
 
 // TestRejectsNonLoopbackAddr 验证安全线（AGENTS.md §4）：
-// 没有自身鉴权前禁止对外监听。
+// 没有自身鉴权前禁止对外监听，且默认 fail-closed。
 func TestRejectsNonLoopbackAddr(t *testing.T) {
 	for _, addr := range []string{"0.0.0.0:8080", ":8080", "192.168.1.5:8080", "example.com:80"} {
 		t.Run(addr, func(t *testing.T) {
 			t.Setenv("SIRIUS_ADDR", addr)
+			t.Setenv("SIRIUS_ALLOW_NON_LOOPBACK", "")
 			_, err := FromEnv()
 			if err == nil {
 				t.Fatalf("监听 %q 应当被拒绝", addr)
@@ -44,7 +45,39 @@ func TestRejectsNonLoopbackAddr(t *testing.T) {
 			if !strings.Contains(err.Error(), "回环") {
 				t.Errorf("错误信息应说明原因，实际: %v", err)
 			}
+			// 错误信息里要给出路，否则容器部署会卡住。
+			if !strings.Contains(err.Error(), "SIRIUS_ALLOW_NON_LOOPBACK") {
+				t.Errorf("错误信息应提示容器部署的开关，实际: %v", err)
+			}
 		})
+	}
+}
+
+// TestAllowNonLoopbackEscapeHatch 验证容器部署的显式开关。
+//
+// 容器里必须绑 0.0.0.0，否则 Docker 的端口映射转发不进容器。
+// 进程无法知道宿主侧的映射是否只开了回环，所以这必须是**显式**声明，
+// 而且开启后 main 会打告警（见 NonLoopbackAcknowledged）。
+func TestAllowNonLoopbackEscapeHatch(t *testing.T) {
+	t.Setenv("SIRIUS_ADDR", "0.0.0.0:8080")
+	t.Setenv("SIRIUS_ALLOW_NON_LOOPBACK", "1")
+
+	opt, err := FromEnv()
+	if err != nil {
+		t.Fatalf("显式开启后应当允许绑定非回环地址: %v", err)
+	}
+	if !opt.NonLoopbackAcknowledged {
+		t.Error("NonLoopbackAcknowledged 应为真，以便 main 打告警")
+	}
+
+	// 回环地址不应被标记（没有需要告警的事）。
+	t.Setenv("SIRIUS_ADDR", "127.0.0.1:8080")
+	opt, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if opt.NonLoopbackAcknowledged {
+		t.Error("回环地址不应标记为非回环")
 	}
 }
 

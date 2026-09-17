@@ -38,6 +38,16 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: opt.LogLevel}))
 	slog.SetDefault(logger)
 
+	// 绑在非回环地址上时打一条显眼告警：这条安全线只能靠部署方守
+	// （进程无法知道宿主侧的端口映射是否只开了回环）。
+	if opt.NonLoopbackAcknowledged {
+		logger.Warn("已绑定非回环地址",
+			slog.String("addr", opt.Addr),
+			slog.String("风险", "Sirius 尚无自身鉴权，/amkr/ 等同于 AMKR 完整管理权限"),
+			slog.String("要求", "必须确保端口只映射到宿主回环，例如 127.0.0.1:8080:8080"),
+		)
+	}
+
 	// AMKR 客户端。连不上不让启动失败：先跑起来，LLM 调用失败会
 	// 以事件回到 agent 并记进意识流（R4/R10）。
 	amkrClient, err := llm.New(opt.AMKR)

@@ -1,0 +1,90 @@
+# Sirius 人格模拟器的 v1 部署：两个容器。
+#
+# 为什么分开而不是单镜像双进程：AMKR 与 Sirius 的升级节奏、配置、镜像
+# 维护者都不同，合在一起会让"只升 AMKR"变成重打整个镜像。单镜像双进程
+# 留作后续的分发优化，不是 v1 目标（docs/llm-amkr.md §5）。
+#
+# 用法：
+#   cp .env.example .env      # 填 AMKR_API_KEY 等
+#   docker compose up --build
+#
+# 只暴露 Sirius 一个端口，且**绑在宿主回环**（见 ports 的说明）。
+
+services:
+  amkr:
+    # 锁死版本，不要用 latest：/amkr/ 反代依赖前端从页面路径推导 API 基址
+    # 的行为（apiBase()），该行为在版本之间变过（docs/llm-amkr.md §4）。
+    #
+    # ⚠️ v4.1.0 **没有** apiBase()，其前端把请求发到根绝对路径
+    # （fetch("/api/settings")），挂在 /amkr/ 下不会经过反代。等 AMKR
+    # 发布含该改动的版本后改成那个 tag。改动前 /amkr/ 页面能打开，
+    # 但管理请求会落到 Sirius 自己的路由上（表现为 404 或空响应）。
+    image: ghcr.io/sparrived/auto-model-key-router:v4.1.0
+    restart: unless-stopped
+    # 关闭运维接口（读宿主机日志、启停进程、改写本机 Claude Code/Codex 配置）。
+    # 这些接口作用于"服务所在的这台机器"，在容器里语义不成立，返回 404
+    # 比逐个路径拉黑更可靠（docs/llm-amkr.md §4）。这是持久化设置，会写入配置。
+    command: ["amkr", "--host", "0.0.0.0", "--serve-foreground", "--no-ops"]
+    environment:
+      # 容器内配置、metrics、日志都在 /data 下（AMKR 镜像用 XDG_CACHE_HOME
+      # 把状态推到 /data/auto-model-key-router）。
+      XDG_CACHE_HOME: /data
+      TZ: Asia/Shanghai
+    volumes:
+      # 命名卷：删容器不丢配置。首次启动会生成配置与 local_api_key，
+      # 用 `docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key` 取。
+      - amkr-data:/data
+    # 刻意**不**发布端口：Sirius 通过服务名 amkr:8000 访问它。
+    # AMKR 容器内固定监听 0.0.0.0（否则端口映射进不去），所以更要避免
+    # 把 8000 映射出去 —— 那等于把完整管理权限暴露给局域网。
+    expose:
+      - "8000"
+    healthcheck:
+      # /health 免鉴权，是官方推荐的就绪判断（不要用 / 或猜端口）。
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  sirius:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      amkr:
+        # 等 AMKR 真的能响应健康检查再启动，避免首轮 LLM 调用全部失败。
+        condition: service_healthy
+    environment:
+      AMKR_BASE_URL: http://amkr:8000
+      AMKR_API_KEY: ${AMKR_API_KEY:?请在 .env 里设置 AMKR_API_KEY}
+      AMKR_MODEL: ${AMKR_MODEL:-unified-model}
+      AMKR_TIMEOUT: ${AMKR_TIMEOUT:-120s}
+      AMKR_TASK_DISPATCH: ${AMKR_TASK_DISPATCH:-}
+      AMKR_TASK_MONOLOGUE: ${AMKR_TASK_MONOLOGUE:-}
+      AMKR_TASK_TOOL_READ: ${AMKR_TASK_TOOL_READ:-}
+      # 容器内必须绑 0.0.0.0 才能接收映射进来的流量（Dockerfile 里已设）。
+      SIRIUS_ADDR: 0.0.0.0:8080
+      # 显式确认"我知道自己在绑非回环地址"。进程无法知道宿主侧映射是否
+      # 只开了回环，所以这条安全线只能靠部署方声明（AGENTS.md §4）。
+      # 与下面的 ports 写法是一对，缺了它服务会拒绝启动。
+      SIRIUS_ALLOW_NON_LOOPBACK: "1"
+      SIRIUS_TICK_INTERVAL: ${SIRIUS_TICK_INTERVAL:-1s}
+      SIRIUS_SEED: ${SIRIUS_SEED:-20240101}
+      SIRIUS_START_TICK: ${SIRIUS_START_TICK:-420}
+      SIRIUS_LOG_LEVEL: ${SIRIUS_LOG_LEVEL:-info}
+      TZ: Asia/Shanghai
+    ports:
+      # ⚠️ 只绑宿主回环。写成 "8080:8080" 会把 /amkr/（AMKR 完整管理权限）
+      # 暴露给整个网络 —— Sirius 自身还没有鉴权。
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  amkr-data:
