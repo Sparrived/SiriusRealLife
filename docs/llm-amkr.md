@@ -95,4 +95,22 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 | 服务未就绪 | 无可用 Key 时返回 `503`；上游失败返回 `502` |
 | 任务路由冲突 | 任务名与模型名撞名会在**配置加载时**直接报错，不是运行时 |
 | 参数冲突 | 请求里显式传了任务已固定的采样参数 → `400`（见第 2 节） |
+| 容器 | 镜像 `ghcr.io/sparrived/auto-model-key-router`（tag 为版本号，正式版另带 `latest`）。容器内固定监听 `0.0.0.0`（否则端口映射进不去），端口默认 8000，状态在卷 `/data`（配置为 `/data/auto-model-key-router/router-config.json`）。因此 **AMKR 容器不应发布端口**，只让 Sirius 通过服务名访问 |
+| 取本地 key | `docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key`。该命令会直接输出完整凭据，别在共享终端或会记录历史的地方跑 |
+
+### ⚠️ 当前部署的实际状态（v4.1.0）
+
+本文档描述的 `/amkr/` 反代对**已发布的 v4.1.0 只能部分生效**，接入时要知道：
+
+- `/amkr/health`、`/amkr/ui/index.html` 等**静态资源与免鉴权接口正常**（实测 200）。
+- 但 v4.1.0 的 WebUI **没有** `apiBase()`，它的前端把请求发到根绝对路径
+  （`fetch("/api/settings")`），因此这些请求**不经过 `/amkr/` 反代**，会落到
+  Sirius 自己的路由上。表现为管理页面能打开、但一操作就 404 或空白。
+- Go 侧反代实现（剥前缀 + `Header.Set` 注入 + 403 运维接口）已按目标行为
+  写好并有测试覆盖，等 AMKR 发布含 `apiBase()` 的版本后改 `docker-compose.yml`
+  里的 image tag 即可生效。
+- 已知的绕过办法：把 AMKR 容器的 8000 端口发布到宿主回环
+  （`127.0.0.1:28881:8000`），直接访问 `http://127.0.0.1:28881/ui/`，
+  不走 Sirius 反代。**只在宿主回环上发布**，因为那等同于完整管理权限。
+
 | 切换 Key | 同一模型配了多个 Key 时由 AMKR 决定用哪个，Sirius 无法（也不需要）指定。走了备选模型时响应带 `X-AMKR-Fallback: true`，可用于观测降级 |

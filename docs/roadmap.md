@@ -75,6 +75,6 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 | R7 工具可见性 | **已定** | 状态声明信息可见性 + 建议动作，非工具白名单。见 [`memory.md`](memory.md) §7.1 |
 | 向量库 | **已定** | **Sirius 自有资产**（AMKR 只提供 embedding 计算）。Go 内暴力余弦 + 关键词两路融合，不引外部向量库；Phase 2 落地。见 [`memory.md`](memory.md) §5.2 |
 | 任务名划分 | 待定 | 先用一个任务跑通，之后按调用点（状态分派 / 内心独白 / 工具解读）拆 |
-| Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外 |
+| Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外。容器部署因此有一条硬约束：端口只能映射到宿主回环（见 `docker-compose.yml`） |
 | 持久化 | v1 全内存 | 重启即清零，Phase 1 够用。⚠️ **Phase 2 起向量必须落盘**：它是项目资产，且重算 embedding 等于重复付费调 AMKR。见 [`memory.md`](memory.md) §5.2 |
-| 前端设计风格 | 待定 | 参考 `design-taste-frontend` 技能 |
+| 前端设计风格 | **已定** | 实时观测仪表盘（非营销页）：单一强调色 + 发丝线分组 + 系统字体栈，`DESIGN_VARIANCE 6 / MOTION_INTENSITY 4 / VISUAL_DENSITY 6`。取值与理由见 [`web/README.md`](../web/README.md)，对比度由 `npm run check:contrast` 断言 |
