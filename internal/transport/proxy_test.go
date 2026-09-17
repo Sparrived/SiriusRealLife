@@ -1,10 +1,16 @@
 package transport
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Sparrived/SiriusRealLife/internal/fsm"
 )
 
 // newFakeAMKR 起一个假的 AMKR，记录它收到的路径与 Authorization 头。
@@ -218,8 +224,97 @@ func TestProxyAllowOpsBypassesBlock(t *testing.T) {
 	}
 }
 
-// TestProxyUnreachableReturns502 验证 AMKR 不可达时如实报 502。
-func TestProxyUnreachableReturns502(t *testing.T) {
+// TestStaticAndProxyCoexist 回归测试：同时挂静态目录与 /amkr/ 反代。
+//
+// 这个组合曾经让服务启动即 panic：
+//
+//	panic: pattern "/amkr/" conflicts with pattern "GET /"
+//	  (/amkr/ matches more methods than GET /, but has a more specific path pattern)
+//
+// Go 1.22 的 ServeMux 在判定冲突时，两种模式"各有一方面更具体"就冲突。
+// 之前的单元测试分别验证了两者，却没有任何一条同时设置 StaticDir 与
+// Proxy —— 而生产配置（cmd/sirius）恰好两者都开。只有真正跑二进制才暴露。
+func TestStaticAndProxyCoexist(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"),
+		[]byte("<!doctype html><title>sirius</title>"), 0o644); err != nil {
+		t.Fatalf("写静态文件: %v", err)
+	}
+	fake, cap := newFakeAMKR(t)
+	proxy, err := NewAMKRProxy(AMKRProxyOptions{Target: fake.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatalf("NewAMKRProxy: %v", err)
+	}
+
+	b := NewBroadcaster()
+	agent, err := fsm.New(fsm.Options{
+		Name: "t", States: fsm.MVPStates(), Seed: 1,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("fsm.New: %v", err)
+	}
+	s := NewServer(Options{
+		Agent: agent, Broadcaster: b, AgentID: "sirius",
+		StaticDir: dir, Proxy: proxy,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	// 注册本身不能 panic —— 这就是这个测试的核心。
+	var h http.Handler
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("同时挂 StaticDir 与 Proxy 时注册路由 panic: %v", r)
+			}
+		}()
+		h = s.Handler()
+	}()
+
+	// 静态首页走本地文件。
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET / 状态码 = %d, 期望 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "sirius") {
+		t.Errorf("GET / 应返回静态首页，实际 %q", rec.Body.String())
+	}
+
+	// /amkr/ 走反代，而不是被静态目录吃掉。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/amkr/health", nil))
+	<-cap.done
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /amkr/health 状态码 = %d, 期望 200", rec.Code)
+	}
+	if got := cap.paths[len(cap.paths)-1]; got != "/health" {
+		t.Errorf("/amkr/ 应走反代（上游 /health），实际上游路径 %q", got)
+	}
+
+	// /amkr（无尾斜杠）应被重定向，而不是落到静态目录的 404。
+	// ServeMux 的子树重定向在这个组合下是 307（Temporary Redirect）。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/amkr", nil))
+	if rec.Code != http.StatusTemporaryRedirect &&
+		rec.Code != http.StatusMovedPermanently &&
+		rec.Code != http.StatusFound {
+		t.Errorf("GET /amkr 状态码 = %d, 期望重定向", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.HasSuffix(loc, "/amkr/") {
+		t.Errorf("重定向目标 = %q, 期望指向 /amkr/", loc)
+	}
+
+	// API 路由仍然可用，没被 "/" 抢走。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /api/v1/health 状态码 = %d, 期望 200", rec.Code)
+	}
+}
+
+// TestUnreachableProxyReturns502 验证 AMKR 不可达时如实报 502。
+func TestUnreachableProxyReturns502(t *testing.T) {
 	proxy, err := NewAMKRProxy(AMKRProxyOptions{Target: "http://127.0.0.1:1", APIKey: "k"})
 	if err != nil {
 		t.Fatalf("NewAMKRProxy: %v", err)

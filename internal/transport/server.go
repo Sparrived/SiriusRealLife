@@ -134,7 +134,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
 	if s.opt.StaticDir != "" {
-		mux.Handle("GET /", http.FileServer(http.Dir(s.opt.StaticDir)))
+		// 刻意**不**用 "GET /"：那会与 "/amkr/" 冲突 —— Go 1.22 的 ServeMux
+		// 判定「GET / 方法更具体」而「/amkr/ 路径更具体」，两者都不比对方
+		// 更具体，于是注册时直接 panic。用不带方法的 "/" 让它退化为
+		// "路径更具体的 /amkr/ 胜出"，语义正确且不冲突。
+		//
+		// ServeMux 会自动把 /amkr 重定向到 /amkr/（子树模式的既有行为）。
+		mux.Handle("/", http.FileServer(http.Dir(s.opt.StaticDir)))
 	}
 	if s.opt.Proxy != nil {
 		// 路径 1:1 透传，不改写任何段（docs/llm-amkr.md §4）。
