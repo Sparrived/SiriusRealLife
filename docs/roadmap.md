@@ -12,6 +12,7 @@
 - ❌ 为"以后可能要多用户"提前做多租户
 - ❌ 自建 LLM 供应商适配层 / SDK 封装（AMKR 已经做了）
 - ❌ 自建管理后台（直接反代 AMKR 的 WebUI）
+- ❌ 引入外部向量库 / 向量数据库 / ANN 服务（Phase 1/2 用 Go 内暴力余弦，见 [`memory.md`](memory.md) §5.2）
 - ❌ 在 Sirius 里做重试、Key 轮询、配额统计（AMKR 的职责）
 
 ## 2. MVP 范围（第一版只做这些）
@@ -32,7 +33,7 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 - `/amkr/` 反代可用，能在 Sirius 页面上切到 AMKR WebUI 配模型
 
 **记忆部分按 [`memory.md`](memory.md) §8 Phase 1 做**：unread 队列、`@我`/回复打断（带 `uninterruptible` guard）、已读游标、关键词打捞返回整段、记忆曲线 + Shadow、升格（源条目删除）。
-**Phase 1 不做**：RAG/embedding、LLM 整合、自我模型。
+**Phase 1 不做**（顺序靠后，非放弃）：向量检索、LLM 整合、自我模型。
 
 ### 验收标准
 
@@ -49,8 +50,8 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 
 按 [`memory.md`](memory.md) §8 的分期，不承诺顺序：
 
-- **Phase 2**：LLM 整合（event → consolidated）、自我模型 + 常驻 prompt、整合记忆参与检索
-- **Phase 3**：RAG（若关键词打捞被证明不够用，且 AMKR 侧 embedding 可用）
+- **Phase 2**：向量库（§5.2：暴力余弦 + 两路融合，Go 内实现）、LLM 整合（event → consolidated）、自我模型 + 常驻 prompt、整合记忆参与检索
+- **Phase 3**：规模优化（ANN，若暴力余弦成为瓶颈）、多 agent 互动
 - 多个 agent 互动
 - 心境真正影响权重（MVP 里心境可以只是存在但不参与）
 - 配置热加载（状态表迁到 `config/`）
@@ -67,8 +68,8 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 | 升格阈值 | **已定（可调初值）** | 100 tick 内打捞 ≥3 次，或 importance ≥7 且打捞 ≥1 次。见 [`memory.md`](memory.md) §5.3 |
 | 整合记忆影响行为 | **已定** | 双通道：可被检索 + 自指内容进**自我模型**常驻 prompt。见 [`memory.md`](memory.md) §6 |
 | R7 工具可见性 | **已定** | 状态声明信息可见性 + 建议动作，非工具白名单。见 [`memory.md`](memory.md) §7.1 |
-| embedding / RAG | **推迟到 Phase 3** | AMKR 下个版本起原生支持 embeddings（v4.1.0 无）。Phase 1/2 用关键词 + LLM 重排，先验证机制再付向量成本。见 [`memory.md`](memory.md) §5.2 |
+| 向量库 | **已定** | **Sirius 自有资产**（AMKR 只提供 embedding 计算）。Go 内暴力余弦 + 关键词两路融合，不引外部向量库；Phase 2 落地。见 [`memory.md`](memory.md) §5.2 |
 | 任务名划分 | 待定 | 先用一个任务跑通，之后按调用点（状态分派 / 内心独白 / 工具解读）拆 |
 | Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外 |
-| 持久化 | 暂不需要 | v1 全内存，重启即清零 |
+| 持久化 | v1 全内存 | 重启即清零，Phase 1 够用。⚠️ **Phase 2 起向量必须落盘**：它是项目资产，且重算 embedding 等于重复付费调 AMKR。见 [`memory.md`](memory.md) §5.2 |
 | 前端设计风格 | 待定 | 参考 `design-taste-frontend` 技能 |

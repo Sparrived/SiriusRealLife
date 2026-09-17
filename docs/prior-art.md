@@ -49,7 +49,7 @@ importance 的原文 prompt：
 
 ⚠️ **对你的意义**：我上次说你的意识流"三层够用"，这个判断要修正——**你缺的是 working 层里的检索函数**。只有 `最近 N 条` 是不够的：最近 N 条会漏掉"前天那件很重要的事"。上面这个三因子公式是现成的，且 paper 做了消融实验证明有效。
 
-⚠️ **注意成本**：relevance 需要 embedding。如果 AMKR 那边不提供 embedding 端点，v1 可以先只用 **recency + importance**（importance 让 LLM 在写记忆时顺手打分），把 relevance 留到后面。**这比不做检索、只取最近 N 条要好。**
+⚠️ **注意成本**：relevance 需要 embedding。AMKR 下一个版本起原生提供 embedding **计算**（`v1/embeddings`），但向量**库**（索引、持久化、余弦检索、融合排序）是 Sirius 自己的活，不能省。v1 可以先只用 **recency + importance**，把 relevance 留到 Phase 2 —— 顺序问题，不是取舍。**这比不做检索、只取最近 N 条要好。**
 
 ### 1.3 反思（reflection）：你缺的这一层
 
@@ -261,7 +261,7 @@ AGENTS.md 目前的 **R7** 写的是"状态声明所需工具写 `Tools: []strin
 
 - **不自建计划层 / 每日意图**：MVP 收敛掉。⚠️ **已知风险**：纯加权分派可能产生"12 点吃午饭、12:30 又吃、1 点再吃"这类时间尺度不一致的行为（§1.4）。若 Phase 1 验收时观察到，补一个每日粗粒度意图即可。
 - **不引入 GM/裁决器**：单 agent、无世界交互，暂不需要。多 agent 互动时（roadmap §3）再加。
-- **不做 embedding / 向量库（Phase 1/2）**：见 `memory.md` §5.2。AMKR 下个版本起原生支持 embeddings，届时无适配成本；分期理由转为"先验证关键词打捞是否够用"。⚠️ 风险：关键词打捞漏同义词；补偿手段是 LLM 查询扩展。
+- **向量库要做，不是可选项**：见 `memory.md` §5.2。AMKR 只提供 embedding **计算**，索引/持久化/检索/融合排序是 Sirius 的自有资产（Phase 2 落地）。自建部分**不引外部向量库**——1 个 agent 用暴力余弦足够，符合反目标。⚠️ 必须防 ai-town 那类坑：**换 embedding 模型要重建索引**，记录里存模型标识。⚠️ 风险：纯关键词阶段会漏同义词；补偿手段是 LLM 查询扩展。
 - **不引入 Concordia / LangChain 之类框架**：架构思路照抄，代码自己写（符合 AGENTS.md 反目标）。
 - **不自建计划器的递归分解**：那是为 25 个 agent 跑两天的研究项目准备的，1 个 agent 用不上。
 
