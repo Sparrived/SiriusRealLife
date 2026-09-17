@@ -46,6 +46,25 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 
 影响方向是**单向**的：心境 → 权重/prompt/参数；状态 → 只能改心境和意识流。
 
+衰减速率是**人格参数**（`fsm.MoodRates`），不是散在代码里的字面量：它直接决定人格"像不像人"，要能按人格调、能被测试断言。
+
+#### 精力必须收支平衡（易错点）
+
+精力唯一的回复手段是睡觉（`sleeping.OnExit → Energy = 95`）。因此**日衰减总量必须小于"一次睡眠能补回的量 × 日均睡眠次数"**，否则精力会长期钉在 0，人格失去"累"的层次——而所有单元测试照样通过，只有跑一整天数据才看得出来。
+
+同样地，状态的精力成本必须与**停留时长**成正比，不能每次进入扣一个固定值：`working` 一天要进入几十次，固定扣费等于按"次数"收钱，与"实际干了多久"无关。`enter()` 先算好 `dwellUntil` 再调用 `OnEnter`，所以 `OnEnter` 里可以用 `Agent.PlannedDuration()` 拿到本次计划时长。
+
+实测（15 种子 × 14 天，改前/改后）：
+
+| 配置 | 精力为 0 的时间占比 | 最长连续为 0 |
+|---|---|---|
+| 固定每次扣 5 点（改前） | 46.5% | 10.4 游戏小时 |
+| 按时长计费 + 衰减 100/1440（现） | 0.0% | 0.9 游戏小时 |
+
+这个平衡由 `TestMoodEconomyBalanced` 守住。调 `DefaultMoodRates()` 或状态成本后必须重跑它。
+
+> 已知不足：睡眠时刻在 24 小时上**接近均匀分布**，因为睡眠只持续 1–3 小时，而精力周期约一天，于是入睡点会自由漂移。要让人格有稳定作息（夜里睡、白天醒），需要引入"昼夜节律"这一类额外约束，属于后续工作，MVP 不做。
+
 ### 2.3 分派器（dispatcher）
 
 在"该换状态了"这一刻被调用。流程：
@@ -108,16 +127,20 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 ## 3. 目录结构
 
 ```
-cmd/agent/           程序入口，只做装配（读配置、建 agent、起 http），不放业务逻辑
-internal/fsm/        状态机核心：状态定义、分派器、tick 循环、状态转移
-internal/mood/       心境（连续量），影响分派权重与工具参数
-internal/tools/      工具实现，每个工具一个文件
+cmd/sirius/          程序入口，只做装配（读配置、建 agent、起 http、起 tick 源），不放业务逻辑
+internal/fsm/        状态机核心：状态定义、分派器、tick 循环、心境、Attention/Ticker 缝口
 internal/llm/        LLM 客户端。唯一实现是 AMKR 的 OpenAI 兼容接口
 internal/memory/     记忆分层：staging / event / consolidated / self-model / Shadow
 internal/transport/  HTTP 路由 + SSE 推送 + AMKR WebUI 反代
-config/              状态表、权重、prompt 模板
-web/                 Vue 3 + Vite + TS 前端
+internal/config/     环境变量配置与校验（含回环地址硬校验）
+internal/tick/       唯一的时间换算点（R8）：真实时间 → tick
+internal/acceptance/ roadmap §2 验收标准的端到端测试
+config/              状态表、权重、prompt 模板（尚未落地，见下）
+web/                 Vue 3 + Vite + TS 前端（尚未落地）
 docs/                本目录
 ```
+
+心境**不是**独立包：它与状态机强耦合（分派权重、衰减、prompt），拆开会造成
+`fsm` ←→ `mood` 双向依赖，因此与状态定义一起放在 `internal/fsm`。
 
 新目录必须有明确归属，不进 `internal/` 就别建。禁止 `utils/`、`common/`、`helpers/`、`models/` 这类无主题垃圾桶。

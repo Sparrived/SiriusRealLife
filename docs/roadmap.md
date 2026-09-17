@@ -46,6 +46,11 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 5. 不在 `scrolling_phone` 时 QQ 消息**不进 prompt**；被 @ 能打断；`sleeping` 时不打断但有记录
 6. 有记忆因长期不打捞而沉入 Shadow，且 Shadow 内容**不出现在 prompt**
 
+以上 6 条已由 [`internal/acceptance`](../internal/acceptance/acceptance_test.go) 逐条覆盖（10 条测试，装配方式与 `cmd/sirius` 一致）。另外补了两条原来没写进验收、但会悄悄坏掉的：
+
+- **R3 可复现**：同种子跑 200 tick，状态序列必须逐 tick 一致
+- **tick 真的驱动记忆**：只推 agent 的 tick（不手动调 `Store.Tick`），1000 tick 后记忆必须已沉入 Shadow
+
 ## 3. 跑通之后再考虑
 
 按 [`memory.md`](memory.md) §8 的分期，不承诺顺序：
@@ -53,7 +58,7 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 - **Phase 2**：向量库（§5.2：暴力余弦 + 两路融合，Go 内实现）、LLM 整合（event → consolidated）、自我模型 + 常驻 prompt、整合记忆参与检索
 - **Phase 3**：规模优化（ANN，若暴力余弦成为瓶颈）、多 agent 互动
 - 多个 agent 互动
-- 心境真正影响权重（MVP 里心境可以只是存在但不参与）
+- 昼夜节律（让睡眠收敛到夜间；现状入睡时刻在 24 小时上接近均匀，见 [`architecture.md`](architecture.md) §2.2）
 - 配置热加载（状态表迁到 `config/`）
 - 单镜像双进程分发
 
