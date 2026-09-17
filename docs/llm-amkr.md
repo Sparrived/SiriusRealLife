@@ -33,6 +33,37 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 > 任务路由把「模型 + 固定采样参数」打包成一个可直接当 `model` 传的名字。任务名不能与模型 ID、别名、隐藏别名或 `unified-model` 撞名，也不能指定 Key。
 
+### 结构化输出
+
+需要模型回固定字段时（目前只有独白），用 `response_format = json_schema` + `strict: true`：
+
+```jsonc
+{
+  "model": "TASK_XXXXXX",
+  "messages": [{"role": "user", "content": "…"}],
+  "stream": false,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "monologue",
+      "strict": true,                      // 关键：只有 strict 约束字段名
+      "schema": { "type": "object", "properties": { … },
+                  "required": [ … ], "additionalProperties": false }
+    }
+  }
+}
+```
+
+**必须按"尽力而为"处理，不能当保证**：
+
+- 用 `strict: true` 而不是 `json_object`。`json_object` 只保证"是 JSON"，**字段名仍由模型自起**（实测同一 prompt 下有的路由回 `answer`、有的回 `内心活动`），等于没约束
+- **忽略 `response_format` 的路由不一定报错**，可能返回 `200` + 散文。这是比 `400` 更危险的失败模式：错误发生在 AMKR 侧，Sirius 只看到"解析不出字段"。实测 wb2api 就是这样
+- 因此调用方必须能接受非 JSON 回复，并按文本兜底解析（见 [memory.md](docs/memory.md) §8.5）。**不要**因为"已经请求了 schema"就省掉兜底分支
+- 请求里为 nil 时整个字段必须消失（`omitempty`）：不给不需要结构化输出的调用点带上空壳
+- prompt 里同时写出字段名。schema 被忽略时，那是唯一还在起作用的约束
+
+> 只在**确实需要按字段分类型**时才用。普通调用点（如工具结果解读）要的是一句话，加 schema 只会让模型把答案塞进它猜的字段里。
+
 ## 3. 超时、重试、流式
 
 - **Sirius 不重试 LLM 调用。** AMKR 已负责重试、切换 Key、冷却异常 Key。客户端重试 = 双倍计费 + 日志噪音
