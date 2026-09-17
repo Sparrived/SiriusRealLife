@@ -1,0 +1,24 @@
+{
+  "name": "sirius-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Sirius 人格模拟器的观测前端：意识流 + 状态机实时视图",
+  "scripts": {
+    "dev": "vite",
+    "build": "node check-contrast.mjs && vue-tsc --noEmit && vite build",
+    "build:fast": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "check:contrast": "node check-contrast.mjs"
+  },
+  "dependencies": {
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.0",
+    "vue-tsc": "^3.1.4"
+  }
+}

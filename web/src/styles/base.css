@@ -1,0 +1,89 @@
+/*
+ * Sirius 观测台样式。
+ *
+ * 设计取向（不是营销页，是仪表盘，见 design-taste-frontend §13）：
+ * 一个 agent 的内心实时视图，密度偏高、动效克制。
+ *   DESIGN_VARIANCE 6 / MOTION_INTENSITY 4 / VISUAL_DENSITY 6
+ *
+ * 刻意避开的东西：AI 紫渐变、玻璃拟态、三等分卡片、Inter 默认、
+ * 装饰性 SVG、emoji。字体用系统栈（本地工具不引 Google Fonts）。
+ *
+ * 配色：近黑冷调基底 + **单一**强调色（青绿，代表"活着"）。
+ * 状态色是**语义**例外：四个状态需要可区分，这是一份有文档的系统，
+ * 不是随手加的颜色。
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0a0b0d;
+  --bg-raised: #101215;
+  --bg-inset: #0d0f11;
+  --line: #1e2126;
+  --line-strong: #2b3038;
+
+  --text: #e6e9ee;
+  --text-dim: #98a0ab;
+  /*
+   * 最弱一级文字。取值受 WCAG AA 约束，不是凭手感调的：
+   * 它承载 11px 的提示文字（小字需 4.5:1），而三种背景
+   * (--bg / --bg-raised / --bg-inset) 里最差的一个也要过线。
+   * 原值 #626b76 只有 3.47:1，不达标；#767f8a 最差 4.62:1 通过。
+   * 「最弱」不等于「看不清」。
+   */
+  --text-faint: #767f8a;
+
+  /* 唯一强调色：青绿。用于"当前活跃"这一件事。 */
+  --accent: #34d3a6;
+  --accent-dim: #1d7a61;
+
+  /* 语义状态色（有文档的例外，见上）。 */
+  --ok: #6aa8ff;
+  --sleep: #8b7cd8;
+  --muted: #6d7683;
+  --warn: #e0a33e;
+
+  --radius: 4px;
+  --radius-lg: 6px;
+
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 观测台是仪表盘：数字与状态名用等宽，避免跳动时宽度抖动。 */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 动效一律尊重系统偏好。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
