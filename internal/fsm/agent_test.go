@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,46 +111,73 @@ func TestNoConsecutiveSameState(t *testing.T) {
 	}
 }
 
-// TestMentionPreempts 验证 R3/§2：被 @ 能抢占当前状态。
-func TestMentionPreempts(t *testing.T) {
+// TestMentionDoesNotPreempt 验证 §2.1：@ 不抢占状态。
+//
+// 这是对旧行为的**反转**。曾经 @ 会硬编码切到 scrolling_phone，那是
+// 把 QQ 的语义搞错了：@ 让人注意到，但不掐断你手上的事。现在它只是
+// 负载里的一个标记（影响提示文案与队列重要性），不参与控制流。
+func TestMentionDoesNotPreempt(t *testing.T) {
 	a := newTestAgent(t, 1, fakeChatter{})
 	ctx := context.Background()
-	// 先走到一个非 scrolling_phone 的状态。
-	if a.Current == "scrolling_phone" {
-		a.Step(ctx)
-	}
-	before := a.Current
+	a.Current = "working"
 
-	a.handleEvent(ctx, Event{Kind: EventMention})
+	a.handleEvent(ctx, Event{Kind: EventUserMessage})
 
-	if a.Current != "scrolling_phone" {
-		t.Fatalf("被 @ 后应进入 scrolling_phone，实际 %s", a.Current)
+	if a.Current != "working" {
+		t.Fatalf("@ 不该改变状态，实际变成 %s", a.Current)
 	}
-	if rec := a.LastRecord(); rec.Reason != "preempt" {
-		t.Fatalf("转移理由应为 preempt，实际 %s", rec.Reason)
-	}
-	if before == "scrolling_phone" {
-		t.Skip("前置状态恰好是 scrolling_phone，跳过")
+	// 也不该留下任何转移记录。
+	if rec := a.LastRecord(); rec.Reason == "preempt" {
+		t.Fatal("不该再有 preempt 转移理由")
 	}
 }
 
-// TestSleepingDefersMention 验证验收 5：sleeping 时 @ 不打断但有记录。
-func TestSleepingDefersMention(t *testing.T) {
+// TestMentionSurvivesSleeping 验证睡着时收到 @ 只留下记录，不改变状态。
+//
+// 旧实现靠 `Uninterruptible` + 延迟队列实现"不打断但有记录"。现在
+// 不需要那套机制：没有抢占，自然就打断不了；"睡着时看不见手机"
+// 由 sleeping 不订阅 QQ 表达（被门控的是信息）。
+func TestMentionSurvivesSleeping(t *testing.T) {
 	a := newTestAgent(t, 1, fakeChatter{})
 	ctx := context.Background()
-	a.Current = "sleeping" // 直接置入，避免依赖随机
+	a.Current = "sleeping"
+	before := len(a.Stream)
 
-	a.handleEvent(ctx, Event{Kind: EventMention})
+	a.handleEvent(ctx, Event{Kind: EventUserMessage})
 
 	if a.Current != "sleeping" {
-		t.Fatalf("sleeping 不应被 @ 打断，实际变成 %s", a.Current)
+		t.Fatalf("sleeping 不应被打断，实际变成 %s", a.Current)
 	}
-	if len(a.Deferred) != 1 {
-		t.Fatalf("延迟事件数 = %d, 期望 1", len(a.Deferred))
+	if len(a.Stream) <= before {
+		t.Fatal("收到消息应留下记录")
 	}
-	// 记录必须留下：意识流应提到这件事。
-	if len(a.Stream) == 0 {
-		t.Fatal("sleeping 时收到 @ 应留下记录")
+}
+
+// TestPumpFeedsOnlySubscribed 验证"状态 = 一段订阅"：
+// 订阅了 QQ 的状态在驻留期间持续收到消息，没订阅的收不到。
+//
+// 这是"如何持续一个状态"的核心机制。旧实现只在 OnEnter 读一次，
+// 于是"刷手机时来了新消息"看不见。
+func TestPumpFeedsOnlySubscribed(t *testing.T) {
+	a, quit := newAgentWithFakeAttention(t)
+	defer quit()
+
+	// 只比较**新增**的记录：意识和流里本来就有初始状态的旁白。
+	n := len(a.Stream)
+
+	a.Current = "working" // 不订阅 QQ
+	a.Pump()
+	if len(a.Stream) != n {
+		t.Fatalf("working 不订阅 QQ，不该泵入任何内容，多了：%s", streamTextOf(a))
+	}
+
+	a.Current = "scrolling_phone" // 订阅 QQ
+	a.Pump()
+	if len(a.Stream) <= n {
+		t.Fatal("scrolling_phone 订阅了 QQ，应泵入消息")
+	}
+	if got := streamTextOf(a); !strings.Contains(got, "在吗") {
+		t.Fatalf("应泵入消息正文，实际：%s", got)
 	}
 }
 
@@ -192,8 +220,11 @@ func TestLLMDoesNotBlockTick(t *testing.T) {
 	}
 }
 
-// TestPreemptCancelsInFlightLLM 验证 R4：抢占会取消在途调用。
-func TestPreemptCancelsInFlightLLM(t *testing.T) {
+// TestCancelInFlightLLM 验证 R4：在途调用可被取消（关停路径）。
+//
+// 旧版本测的是"抢占会取消在途调用"。抢占取消后，取消只剩关停这一个
+// 来源（Run 的 ctx.Done 分支），这里直接验证那台机器本身。
+func TestCancelInFlightLLM(t *testing.T) {
 	slow := fakeChatter{delay: 5 * time.Second, reply: "never"}
 	a := newTestAgent(t, 3, slow)
 	ctx := context.Background()
@@ -201,10 +232,10 @@ func TestPreemptCancelsInFlightLLM(t *testing.T) {
 	if err := a.Think(ctx, ChatRequest{Prompt: "思考"}); err != nil {
 		t.Fatalf("Think: %v", err)
 	}
-	a.handleEvent(ctx, Event{Kind: EventMention})
+	a.cancelThinking()
 
 	if a.IsThinking() {
-		t.Fatal("抢占后应取消在途调用（别让它跑完 30 秒再丢弃）")
+		t.Fatal("取消后应清空在途标记（别让它跑完 30 秒再丢弃）")
 	}
 }
 
@@ -220,12 +251,12 @@ func TestSecondThinkRejected(t *testing.T) {
 	}
 }
 
-// TestVisibilityOnlyPhone 验证验收 5 的前半：只有 scrolling_phone 可见 QQ。
+// TestVisibilityOnlyPhone 验证验收 5 的前半：只有 scrolling_phone 订阅 QQ。
 func TestVisibilityOnlyPhone(t *testing.T) {
 	for _, s := range MVPStates() {
 		want := s.Name == "scrolling_phone"
-		if s.Visibility.QQ != want {
-			t.Errorf("状态 %s 的 QQ 可见性 = %v, 期望 %v", s.Name, s.Visibility.QQ, want)
+		if got := s.Subscribes(ChanQQ); got != want {
+			t.Errorf("状态 %s 的 QQ 订阅 = %v, 期望 %v", s.Name, got, want)
 		}
 	}
 }

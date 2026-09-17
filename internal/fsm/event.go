@@ -22,10 +22,14 @@ type Event struct {
 type EventKind string
 
 const (
-	// EventUserMessage 收到一条用户消息。
+	// EventUserMessage 收到一条外部消息。
+	//
+	// **@我 与回复我也是这个类型**，只是负载里 MentionsMe/RepliesToMe
+	// 为真。刻意不区分事件类型：区分会立刻诱导出"按类型决定优先级、
+	// 按优先级抢占状态"的控制流，而 QQ 的现实语义不是这样——@ 只是
+	// 提醒更显眼（弹通知），并不把用户手上的事掐断（docs/memory.md §2.1）。
+	// 显眼程度作用在**内容**（提示文案、队列重要性），不作用在控制流。
 	EventUserMessage EventKind = "user_message"
-	// EventMention 消息里 @ 了 agent。优先级高于普通消息。
-	EventMention EventKind = "mention"
 	// EventLLMDone 一次 LLM 调用完成，带回结果。
 	// 这是 R4 的关键：LLM 结果通过事件回到 agent 自己的 goroutine，
 	// 而不是让调用方直接改状态。
@@ -33,18 +37,3 @@ const (
 	// EventLLMFailed 一次 LLM 调用失败。
 	EventLLMFailed EventKind = "llm_failed"
 )
-
-// priority 返回事件的抢占优先级，数值越大越优先。
-// 普通消息不抢占；被 @ 才抢占（见 docs/memory.md §2）。
-func (k EventKind) priority() int {
-	switch k {
-	case EventMention:
-		return 100
-	case EventLLMDone, EventLLMFailed:
-		return 50
-	case EventUserMessage:
-		return 10
-	default:
-		return 0
-	}
-}

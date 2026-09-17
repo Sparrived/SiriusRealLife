@@ -120,16 +120,17 @@ func TestEventEndpointQueues(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("状态码 = %d, 期望 202；body=%s", rec.Code, rec.Body.String())
 	}
-	// 被 @ 应升级为 mention 事件。
-	if !strings.Contains(rec.Body.String(), string(fsm.EventMention)) {
-		t.Errorf("被 @ 的消息应投递 mention 事件，实际 %s", rec.Body.String())
+	// @ 不另立事件类型：它只是负载里的标记，不参与控制流（§2.1）。
+	if !strings.Contains(rec.Body.String(), string(fsm.EventUserMessage)) {
+		t.Errorf("应投递 user_message 事件，实际 %s", rec.Body.String())
 	}
 
-	// 事件确实进了 agent：推一个 tick 后应被 @ 抢占到 scrolling_phone。
+	// 事件确实进了 agent，但**不该**改变状态：@ 不抢占（§2.1）。
 	// （Events() 是 send-only，正是 R1 的体现——测试也只能通过效果观察。）
+	before := s.opt.Agent.Current
 	s.opt.Agent.Step(context.Background())
-	if got := s.opt.Agent.Current; got != "scrolling_phone" {
-		t.Errorf("被 @ 后应抢占到 scrolling_phone，实际 %s", got)
+	if got := s.opt.Agent.Current; got == "scrolling_phone" && before != "scrolling_phone" {
+		t.Errorf("@ 不该把 agent 抢到 scrolling_phone，实际 %s", got)
 	}
 }
 

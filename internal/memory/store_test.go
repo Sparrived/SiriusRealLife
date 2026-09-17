@@ -10,23 +10,28 @@ import (
 
 func newStore() *Store { return New(DefaultOptions()) }
 
-// TestInterruptOnlyMentionOrReply 验证 §2.1 的三类消息门控。
-func TestInterruptOnlyMentionOrReply(t *testing.T) {
+// TestMentionScoresHigherThanChat 验证 §2.1 取消"打断"后的新落点：
+// @我/回复我的差别体现在**重要性打分**（淘汰优先级），而不是抢占。
+//
+// 旧行为是 Ingest 返回 bool 供 agent 决定抢不抢占。抢占取消后，
+// 这个区别唯一的去处就是 Importance——它必须仍然生效，否则 @ 的
+// 重要消息会因为和水群同分而先被淘汰掉。
+func TestMentionScoresHigherThanChat(t *testing.T) {
 	cases := []struct {
 		name string
 		msg  Message
-		want bool
+		want int
 	}{
-		{"@我", Message{Text: "@我 在吗", MentionsMe: true}, true},
-		{"回复我", Message{Text: "同意", RepliesToMe: true}, true},
-		{"普通群消息", Message{Text: "今天天气不错"}, false},
-		{"两者都是", Message{MentionsMe: true, RepliesToMe: true}, true},
+		{"@我", Message{Text: "@我 在吗", MentionsMe: true}, 8},
+		{"回复我", Message{Text: "同意", RepliesToMe: true}, 7},
+		{"普通群消息", Message{Text: "今天天气不错"}, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := newStore()
-			if got := s.Ingest(c.msg); got != c.want {
-				t.Errorf("打断 = %v, 期望 %v", got, c.want)
+			s.Ingest(c.msg)
+			if got := s.messages[0].Importance; got != c.want {
+				t.Errorf("重要性 = %d, 期望 %d", got, c.want)
 			}
 		})
 	}

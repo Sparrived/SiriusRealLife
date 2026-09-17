@@ -16,12 +16,7 @@ type IncomingMessage struct {
 	Tick Tick
 }
 
-// Interrupts 报告该消息是否应当即时打断（memory.md §2.1）。
-//
-// @我 与 回复我 都打断；其余静默入队。
-func (m IncomingMessage) Interrupts() bool { return m.MentionsMe || m.RepliesToMe }
-
-// MessageSink 收下一条外部消息，返回它是否应当即时打断。
+// MessageSink 收下一条外部消息。
 //
 // 与 Attention 同样定义在 fsm 侧、由 memory.Store 隐式满足：
 // 依赖方向必须是 memory → fsm，接口由使用方定义，因此这里不需要
@@ -30,8 +25,11 @@ func (m IncomingMessage) Interrupts() bool { return m.MentionsMe || m.RepliesToM
 // 为什么必须存在：消息入口是记忆链路的**起点**。没有它，unread 队列、
 // 待选区、打捞、Shadow 在真实运行中永远为空——单元测试各自通过，
 // 装起来却没有任何消息进来，是很容易漏掉的一类缺口。
+//
+// 刻意不返回"该不该打断"：@ 不抢占状态（docs/memory.md §2.1），
+// 是否因此做事由状态自己的退出条件决定，不由消息类型决定。
 type MessageSink interface {
-	Accept(m IncomingMessage) bool
+	Accept(m IncomingMessage)
 }
 
 // messagePayload 是消息事件的 JSON 负载形状。
@@ -48,22 +46,18 @@ type messagePayload struct {
 // NewMessageEvent 把一条外部消息包成投给 agent 的事件。
 //
 // MentionsMe/RepliesToMe 必须进负载：它们决定记忆层的即时重要性
-// （@我 得 8 分，普通消息 2 分），丢了就只剩文本。
+// （@我 得 8 分，普通消息 2 分）以及提示文案的显眼程度，丢了就只剩文本。
 func NewMessageEvent(m IncomingMessage) Event {
 	payload, _ := json.Marshal(messagePayload{
 		From: m.From, Text: m.Text,
 		MentionsMe: m.MentionsMe, RepliesToMe: m.RepliesToMe,
 	})
-	kind := EventUserMessage
-	if m.Interrupts() {
-		kind = EventMention
-	}
-	return Event{Kind: kind, Data: payload}
+	return Event{Kind: EventUserMessage, Data: payload}
 }
 
 // decodeMessage 从事件负载还原消息。
 //
-// 负载可能为空或非法（测试里直接投 Event{Kind: EventMention}），
+// 负载可能为空或非法（测试里直接投 Event{Kind: EventUserMessage}），
 // 此时返回零值而不是报错：一条没有内容的消息不该让 agent 崩溃。
 func decodeMessage(data json.RawMessage) IncomingMessage {
 	var p messagePayload

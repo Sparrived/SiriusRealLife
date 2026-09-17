@@ -40,11 +40,6 @@ type Message struct {
 	Tick       fsm.Tick
 }
 
-// Interrupts 报告该消息是否应当即时打断（§2.1）。
-//
-// @我 与 回复我 都打断；其他静默入队。
-func (m Message) Interrupts() bool { return m.MentionsMe || m.RepliesToMe }
-
 // Entry 是待选区（staging）里的一条记忆。
 type Entry struct {
 	ID       int64
@@ -180,11 +175,16 @@ func New(opt Options) *Store {
 	return &Store{opt: opt}
 }
 
-// Ingest 收一条消息，返回它是否应当即时打断（§2.1）。
+// Ingest 收一条消息进 unread 队列。
 //
-// 打断与否由调用方（agent）决定：本方法只负责入队与判定，
-// 并**不**自己改状态——状态只能由 agent 自己的 goroutine 改（R1）。
-func (s *Store) Ingest(m Message) bool {
+// 只负责入队与打分，**不**改状态——状态只能由 agent 自己的
+// goroutine 改（R1）。
+//
+// 曾经返回"该不该打断"，并驱动 @ 抢占状态。那个语义是错的：
+// QQ 里 @ 只是提醒更显眼（弹通知），不掐断你手上的事。显眼程度
+// 现在作用在 Importance（淘汰优先级）上，不作用在控制流
+// （docs/memory.md §2.1）。
+func (s *Store) Ingest(m Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -196,7 +196,6 @@ func (s *Store) Ingest(m Message) bool {
 
 	s.messages = append(s.messages, m)
 	s.evictUnreadLocked()
-	return m.Interrupts()
 }
 
 // defaultImportance 是入队时的本地启发式打分。

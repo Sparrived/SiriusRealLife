@@ -96,10 +96,6 @@ const follow = computed(() => a.conn.value === 'live')
               <span>思考中</span>
               <span class="num">{{ a.snapshot.value?.thinking ? '是' : '否' }}</span>
             </li>
-            <li>
-              <span>延迟事件</span>
-              <span class="num">{{ a.snapshot.value?.deferred ?? 0 }}</span>
-            </li>
           </ul>
         </section>
 

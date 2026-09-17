@@ -46,8 +46,6 @@ const reasonText = computed(() => {
   switch (dispatch.value?.reason) {
     case 'timeout':
       return '停留到期，加权抽取'
-    case 'preempt':
-      return '被事件抢占'
     case 'init':
       return '初始状态'
     default:
@@ -69,8 +67,7 @@ const reasonText = computed(() => {
         <span class="dot" aria-hidden="true" />
         <span class="name">{{ n.label }}</span>
         <span class="key num">{{ n.name }}</span>
-        <span v-if="n.seesQQ" class="tag">可见 QQ</span>
-        <span v-else-if="n.uninterruptible" class="tag">不可打断</span>
+        <span v-if="n.seesQQ" class="tag">订阅 QQ</span>
       </li>
     </ul>
 

@@ -443,9 +443,8 @@ func TestLLMFailureLoggedWithCause(t *testing.T) {
 
 // TestStreamTextHasNoInternalIdentifiers 验证意识流里不出现内部标识。
 //
-// 意识流是唯一送给 LLM 读的文本。若把事件类型（mention/user_message）
-// 这类内部标识写进去，模型会看到自己不该看见的东西，人格叙事也脏了。
-// 曾经 sleeping 的延迟分支就写了"收到 mention，但现在不能被打断"。
+// 意识流是唯一送给 LLM 读的文本。若把事件类型（user_message）这类内部
+// 标识写进去，模型会看到自己不该看见的东西，人格叙事也脏了。
 func TestStreamTextHasNoInternalIdentifiers(t *testing.T) {
 	a := newTestAgentWith(t, Options{
 		Name: "test", States: MVPStates(), Seed: 7, Initial: "sleeping",
@@ -461,9 +460,10 @@ func TestStreamTextHasNoInternalIdentifiers(t *testing.T) {
 			t.Errorf("意识流出现内部标识 %q:\n%s", bad, got)
 		}
 	}
-	// 但"被延迟"这个事实必须留下（§2.1：延迟量是人格的一部分）。
-	if !strings.Contains(got, "先记下") {
-		t.Errorf("延迟记录丢失:\n%s", got)
+	// 但"有人叫我"这个事实必须留下。sleeping 不再有独立的延迟分支
+	// （没有抢占就没有"延迟"），记录由 ingestMessage 统一写下。
+	if !strings.Contains(got, "有人叫我") {
+		t.Errorf("收到 @ 应留下记录:\n%s", got)
 	}
 }
 

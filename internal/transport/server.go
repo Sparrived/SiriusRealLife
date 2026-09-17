@@ -156,7 +156,6 @@ type stateResponse struct {
 	State     string         `json:"state"`
 	Mood      moodResponse   `json:"mood"`
 	Thinking  bool           `json:"thinking"`
-	Deferred  int            `json:"deferred"`
 	CallCount int            `json:"call_count"`
 	Stream    []streamEntry  `json:"stream"`
 	Last      *dispatchEntry `json:"last_dispatch,omitempty"`
@@ -196,7 +195,6 @@ func (s *Server) toResponse(snap fsm.Snapshot) stateResponse {
 		Tick:      int64(snap.Now),
 		State:     string(snap.Current),
 		Thinking:  snap.Thinking,
-		Deferred:  snap.Deferred,
 		CallCount: snap.CallCount,
 		Mood: moodResponse{
 			Energy:  snap.Mood.Energy,
@@ -315,13 +313,8 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kind := fsm.EventUserMessage
-	switch {
-	case req.MentionsMe:
-		kind = fsm.EventMention
-	case req.RepliesMe:
-		kind = fsm.EventMention // 回复我同样即时打断（docs/memory.md §2.1）
-	}
+	// @我 / 回复我不另立事件类型：它们只是负载里的标记，决定提示文案
+	// 的显眼程度与队列重要性，不决定抢占（docs/memory.md §2.1）。
 	// 负载由 fsm 侧构造（R1）：字段名只在那边定义一次，
 	// 加字段时不会漏改这里。
 	ev := fsm.NewMessageEvent(fsm.IncomingMessage{
@@ -333,7 +326,7 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case s.opt.Agent.Events() <- ev:
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "kind": string(kind)})
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "kind": string(ev.Kind)})
 	case <-r.Context().Done():
 		return
 	case <-time.After(2 * time.Second):

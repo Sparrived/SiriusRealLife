@@ -78,8 +78,7 @@ type Agent struct {
 	Now       Tick
 	Mood      Mood
 	Stream    []StreamEntry
-	Deferred  []Event // uninterruptible 状态下被延迟的事件
-	CallCount int     // LLM 调用次数（测试与 SSE 观测用）
+	CallCount int // LLM 调用次数（测试与 SSE 观测用）
 
 	states        map[StateName]State
 	order         []State // 稳定顺序，保证分派可复现（R3）
@@ -183,7 +182,6 @@ type Snapshot struct {
 	Mood      Mood
 	Stream    []StreamEntry
 	CallCount int
-	Deferred  int
 	Thinking  bool
 	Last      DispatchRecord
 }
@@ -198,7 +196,6 @@ func (a *Agent) snapshot() Snapshot {
 		Mood:      a.Mood,
 		Stream:    stream,
 		CallCount: a.CallCount,
-		Deferred:  len(a.Deferred),
 		Thinking:  a.IsThinking(),
 		Last:      a.lastRecord,
 	}
@@ -421,11 +418,14 @@ func (a *Agent) decayMood() {
 	a.Mood.Annoyed -= a.moodRates.Annoyed
 	a.Mood.Curious -= a.moodRates.Curious
 	a.Mood.Clamp()
+	// 未读堆积是烦躁的**来源**（memory.md §2.2），紧接衰减之后叠加：
+	// 先消气再看红点，语义是"这一刻手机上有多少条未读让我多烦"。
+	a.reactToUnread()
 }
 
 // Step 前进一个 tick。这是业务逻辑的唯一时间入口（R8）。
 //
-// 顺序：先处理到达的事件，再推时间，最后判断是否该换状态。
+// 顺序：先处理到达的事件，再推时间，泵一次订阅，最后判断是否该换状态。
 func (a *Agent) Step(ctx context.Context) {
 	a.drainEvents(ctx)
 	a.Now++
@@ -436,6 +436,10 @@ func (a *Agent) Step(ctx context.Context) {
 	if a.ticker != nil {
 		a.ticker.Tick(a.Now)
 	}
+	// 订阅泵入（"状态持续"的机制落点）。放在换状态判断**之前**：
+	// 这样本 tick 到达的消息能参与这次是否该换状态的判断。
+	// 它必须每 tick 都跑，否则"刷手机时来了新消息"就看不见了。
+	a.Pump()
 
 	if a.Now >= a.dwellUntil {
 		next, rec, err := a.dispatch()
@@ -465,35 +469,19 @@ func (a *Agent) drainEvents(ctx context.Context) {
 	}
 }
 
-// handleEvent 处理单个事件。高优先级事件可抢占当前状态（R3）。
+// handleEvent 处理单个事件。
+//
+// **没有任何事件能抢占状态。** @我 曾经硬编码切到 scrolling_phone，
+// 那是错的：QQ 里 @ 的语义是"提醒更显眼"，不是"掐断你手上的事"。
+// 现在消息只做两件事——进记忆层、留一条观察——是否因此做事由状态
+// 自己的订阅与退出条件决定（docs/memory.md §2.1）。
 func (a *Agent) handleEvent(ctx context.Context, ev Event) {
-	cur := a.states[a.Current]
-
-	// 外部消息先进记忆层，再决定抢不抢占。
-	// 放在抢占分支之前：@我 既能打断、也必须被记住，两件事互不冲突。
-	if ev.Kind == EventMention || ev.Kind == EventUserMessage {
-		a.ingestMessage(ev)
-	}
-
-	// uninterruptible 状态：延迟而非抢占，但必须留下记录。
-	if cur.Uninterruptible && ev.Kind.priority() >= 100 {
-		a.Deferred = append(a.Deferred, ev)
-		// 只写"这条被打断的请求被推迟了"。那句"有人叫我"已由
-		// ingestMessage 写下，这里再写一遍会让意识流出现两条同义记录。
-		// 也不写 ev.Kind：意识流是给 LLM 读的，内部标识不该出现在那里。
-		a.appendStreamKind(KindObservation, "被打断了，但现在不能停，先记下来")
-		return
-	}
-
 	switch ev.Kind {
-	case EventMention:
-		// 被 @ 抢占 → 进入看 QQ。理由见 docs/memory.md §2。
-		// 抢占时取消在途 LLM 调用：别让它跑完 30 秒再丢弃（R4）。
-		a.cancelThinking()
-		a.lastRecord = DispatchRecord{From: a.Current, To: "scrolling_phone", Reason: "preempt", Seq: a.Now}
-		a.enter("scrolling_phone", "preempt")
 	case EventUserMessage:
-		// 记录已由上面的 ingestMessage 写下（这里不再重复一条）。
+		// 先入记忆层（unread 队列的起点），再留一条**不含正文**的观察。
+		// 是否读得到正文取决于当前状态是否订阅 QQ：订阅了由 Step 的
+		// Pump 泵入，没订阅就只是红点数字。
+		a.ingestMessage(ev)
 	case EventLLMDone:
 		a.settleThinking()
 		a.CallCount++
@@ -521,15 +509,17 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 // 这是记忆链路的起点：没有这一步，unread 队列、待选区、打捞、
 // Shadow 在真实运行中永远是空的。
 //
-// **刻意不把消息正文写进意识流**：§2.2 规定内容只在进入"看 QQ"
-// 状态时被读取（由 ReadPhone → Scan 走可见性门控）。这里若顺手把
-// 正文记下来，QQ 门控就被旁路掉了——不论在哪个状态，消息内容都会
+// **刻意不把消息正文写进意识流**：§2.2 规定内容只在订阅了 QQ 的
+// 状态里被读取（由 Pump / ReadPhone → Scan 走可见性门控）。这里若顺手
+// 把正文记下来，QQ 门控就被旁路掉了——不论在哪个状态，消息内容都会
 // 出现在 prompt 里。因此这里只留一条**不含内容**的提示。
+//
+// @我 与回复我的差别只体现在**这条提示的显眼程度**上：真人手机上
+// @ 是弹通知、普通群消息只是红点数字，但两者都不打断你正在做的事。
 func (a *Agent) ingestMessage(ev Event) {
 	m := decodeMessage(ev.Data)
 	m.Tick = a.Now
-	// 返回值是记忆层对"该不该打断"的判定；抢占与否由 agent 自己
-	// 决定（R1），这里只需知道消息已入队。
+	// 状态只能由 agent 自己的 goroutine 改（R1），入队是记忆层的事。
 	if a.sink != nil {
 		a.sink.Accept(m)
 	}
@@ -594,33 +584,18 @@ func (a *Agent) absorbMonologue(data json.RawMessage) {
 // clock 每收到一次值就前进一个 tick —— 真实时间与游戏时间的换算
 // 只在 tick 源做一次（R8），业务逻辑里没有 time.Now()。
 func (a *Agent) Run(ctx context.Context, clock <-chan struct{}) error {
-	// 唤醒被延迟的事件：一旦当前状态允许打断，立刻重放。
 	for {
 		select {
 		case <-ctx.Done():
+			// 关停时取消在途调用，别让它跑完 30 秒再丢弃（R4）。
+			a.cancelThinking()
 			return ctx.Err()
 		case <-clock:
-			a.replayDeferred(ctx)
 			a.Step(ctx)
 		case ev := <-a.events:
 			// 事件立即处理，不必等到下一 tick。
 			a.handleEvent(ctx, ev)
 			a.emit()
 		}
-	}
-}
-
-// replayDeferred 在当前状态可被打断时，重放之前延迟的事件。
-func (a *Agent) replayDeferred(ctx context.Context) {
-	if len(a.Deferred) == 0 {
-		return
-	}
-	if a.states[a.Current].Uninterruptible {
-		return
-	}
-	pending := a.Deferred
-	a.Deferred = nil
-	for _, ev := range pending {
-		a.handleEvent(ctx, ev)
 	}
 }

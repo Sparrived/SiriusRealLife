@@ -24,14 +24,14 @@ func MVPStates() []State {
 			MaxTick:  10,
 			Cooldown: 2,
 			Suggests: []string{"刷手机", "看 QQ", "翻看之前的聊天"},
-			// 看 QQ 就发生在这里：只有这个状态可见 QQ 消息。
-			Visibility: Visibility{QQ: true},
+			// 订阅 QQ：看的到消息，**且在整个驻留期间持续看到**
+			// （Step 每 tick 泵一次）。这是"状态 = 一段订阅"的落点。
+			Channels: []Channel{ChanQQ},
 			OnEnter: func(a *Agent) {
 				a.appendStreamKind(KindAction, "拿起手机刷一刷")
-				// 进入时"解锁扫一眼"：把最近几条未读放进意识流。
-				// 注意读的是**信息**，不是工具——read_qq 之类的工具在
-				// 别的状态下依然可用，只是没东西显现（R7 修订）。
-				a.ReadPhone(scanOnEnterN)
+				// 进入时"解锁扫一眼"：显式读一次，会如实写下
+				// "没有新消息"。之后靠 Pump 静默泵入增量。
+				a.ReadPhone(defaultFeedLimit)
 			},
 		},
 		{
@@ -66,11 +66,12 @@ func MVPStates() []State {
 		{
 			Name: "sleeping",
 			// 基础权重低：睡觉不是靠"想去"，而是靠困。
-			Weight:          4,
-			MinTick:         60,
-			MaxTick:         180,
-			Cooldown:        TicksPerDay / 2, // 睡过之后半天内不再想睡
-			Uninterruptible: true,
+			Weight:   4,
+			MinTick:  60,
+			MaxTick:  180,
+			Cooldown: TicksPerDay / 2, // 睡过之后半天内不再想睡
+			// 刻意**不订阅** QQ：睡着时手机响了也不看。这比旧的
+			// `Uninterruptible` 更准确——被门控的是信息，不是抢占规则。
 			Guard: func(a *Agent) bool {
 				// 作息：真的困了才睡（精力 < 35），或已过午夜仍醒着。
 				// 不要把"夜里"写成无条件的真值：那会让守卫在整个夜间

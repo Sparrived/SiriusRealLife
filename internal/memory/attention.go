@@ -49,9 +49,10 @@ func formatMessage(m Message) string {
 // 整套记忆机制（unread → 待选区 → 打捞 → 升格 → Shadow）在真实
 // 运行中永远是空的——单测各自通过，装起来却没有一条消息进来。
 //
-// 返回是否应当即时打断，由 agent 决定要不要换状态（R1）。
-func (s *Store) Accept(m fsm.IncomingMessage) bool {
-	return s.Ingest(Message{
+// 刻意不返回"该不该打断"：@ 不抢占状态（docs/memory.md §2.1），
+// 收了就是收了。
+func (s *Store) Accept(m fsm.IncomingMessage) {
+	s.Ingest(Message{
 		From:        m.From,
 		Text:        m.Text,
 		MentionsMe:  m.MentionsMe,

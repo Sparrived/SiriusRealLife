@@ -244,86 +244,103 @@ func TestAcceptanceLLMDoesNotBlockTick(t *testing.T) {
 		t.Fatalf("tick 被 LLM 阻塞: 5 tick 用了 %v", elapsed)
 	}
 
-	// 在途期间仍能收事件并被抢占（R3/R4）。
-	h.agent.Events() <- fsm.Event{Kind: fsm.EventMention}
+	// 在途期间仍能收事件（R1/R4）——事件立即处理，不必等 tick。
+	// 但**不抢占状态**：@ 只是提醒更显眼，不掐断手上的事（§2.1）。
+	before := h.agent.Current
+	h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{
+		From: "张三", Text: "在吗", MentionsMe: true,
+	})
 	h.agent.Step(ctx)
-	if got := h.agent.Current; got != "scrolling_phone" {
-		t.Fatalf("调用期间被 @ 应能抢占，实际状态 %s", got)
+	if got := h.agent.Current; got != before {
+		t.Fatalf("收到 @ 不该改变状态，期望仍是 %s，实际 %s", before, got)
 	}
-	// 旧的调用必须已被取消。此时可能有一个**新**的独白在途——
-	// 那是在新状态里正常发起的，不是被抢占的那个。
-	select {
-	case <-cancelled:
-		// 旧调用确实收到了取消。
-	case <-time.After(500 * time.Millisecond):
-		t.Error("抢占后旧的在途调用没有被取消（R4）")
+}
+
+// TestAcceptanceShutdownCancelsInFlightLLM 验证 R4：关停时取消在途调用。
+//
+// 抢占取消后，取消只剩关停这一个来源，因此这里驱动真实的 Run 循环，
+// 而不是手工调一个测试专用的方法。
+func TestAcceptanceShutdownCancelsInFlightLLM(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	cancelled := make(chan struct{}, 4)
+	h := newHarness(t, "working", blockingChatter{release: release, cancelled: cancelled})
+
+	// 构造时进入初始状态即已发起独白，此刻调用在途。
+	if !h.agent.IsThinking() {
+		t.Fatal("进入状态应自动发起独白")
 	}
 
-	// 被取消的调用不该在意识流里留下"失败"记录：那不是故障。
-	close(release)
-	time.Sleep(20 * time.Millisecond)
-	h.agent.Step(ctx)
-	if got := streamText(h.agent); strings.Contains(got, "没想出来") {
-		t.Errorf("被抢占取消的调用不应记为失败:\n%s", got)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.agent.Run(ctx, make(chan struct{})) }()
+
+	cancel()
+
+	select {
+	case <-cancelled:
+		// 在途调用确实收到了取消。
+	case <-time.After(500 * time.Millisecond):
+		t.Error("关停后旧的调用没有被取消（别让它跑完 30 秒再丢弃）")
+	}
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Error("ctx 取消后 Run 应当返回")
 	}
 }
 
 // TestAcceptanceQQGating 验收 5：不在看 QQ 时消息不进意识流；
-// 被 @ 能打断；sleeping 时不打断但有记录。
+// 订阅 QQ 时消息在驻留期间持续可见；@ 不抢占。
 func TestAcceptanceQQGating(t *testing.T) {
 	h := newHarness(t, "working", fakeChatter{reply: "嗯"})
 	ctx := context.Background()
 
-	// 普通消息：静默入队，不打断。
+	// working 不订阅 QQ：消息只留下"有未读"，内容不进意识流。
 	h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{From: "小明", Text: "秘密内容不该泄露"})
 	h.agent.Step(ctx)
 	if got := h.agent.Current; got == "scrolling_phone" {
-		t.Error("普通消息不应把 agent 拉到看 QQ 状态")
+		t.Error("消息不该把 agent 拉到看 QQ 状态（@ 也不抢占了）")
 	}
-
-	// 消息内容不该出现在意识流里（不在看 QQ）。
 	if got := streamText(h.agent); strings.Contains(got, "秘密内容不该泄露") {
 		t.Fatalf("不在看 QQ 时消息内容不应进意识流：%s", got)
-	}
-	// 但应当留下"有未读"这个事实。
-	h.agent.ReadPhone(5) // working 状态：受可见性门控，不读内容
-	if got := streamText(h.agent); strings.Contains(got, "秘密内容不该泄露") {
-		t.Fatalf("working 状态下 ReadPhone 不应读出内容：%s", got)
 	}
 	if h.store.Cursor() != 0 {
 		t.Error("不可见时不应推进已读游标")
 	}
 
-	// 被 @ 打断。
-	h.agent.Events() <- fsm.Event{Kind: fsm.EventMention}
+	// 切到订阅 QQ 的状态：泵入应把内容带出来（走真实的 Step 路径）。
+	h.agent.Current = "scrolling_phone"
 	h.agent.Step(ctx)
-	if got := h.agent.Current; got != "scrolling_phone" {
-		t.Fatalf("被 @ 应打断到 scrolling_phone，实际 %s", got)
-	}
-	// 这次应当读到内容了（可见性生效，OnEnter 触发读取）。
 	if got := streamText(h.agent); !strings.Contains(got, "秘密内容不该泄露") {
-		t.Errorf("进入看 QQ 后应能读到消息：%s", got)
+		t.Errorf("订阅 QQ 后应泵入消息：%s", got)
 	}
 }
 
-// TestAcceptanceSleepingDefersMention 验收 5 的另一半：
-// sleeping 时 @ 不打断，但留下记录，且事件被延迟而非丢弃。
-func TestAcceptanceSleepingDefersMention(t *testing.T) {
-	h := newHarness(t, "sleeping", fakeChatter{reply: "嗯"})
-	ctx := context.Background()
+// TestAcceptanceMentionIsNotPreemption 验收 5 的另一半（已反转）：
+// 收到 @ 不改变状态，但留下记录；睡着时同样不被打断。
+//
+// 旧标准是"被 @ 能打断；sleeping 时不打断但有记录"。@ 抢占整个取消后，
+// 两处的行为统一成"不打断、有记录"，差别只在 sleeping 不订阅 QQ，
+// 因此内容对它不可见。
+func TestAcceptanceMentionIsNotPreemption(t *testing.T) {
+	for _, initial := range []fsm.StateName{"working", "sleeping"} {
+		t.Run(string(initial), func(t *testing.T) {
+			h := newHarness(t, initial, fakeChatter{reply: "嗯"})
+			before := len(h.agent.Stream)
 
-	before := len(h.agent.Stream)
-	h.agent.Events() <- fsm.Event{Kind: fsm.EventMention}
-	h.agent.Step(ctx)
+			h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{
+				From: "张三", Text: "@你 在吗", MentionsMe: true,
+			})
+			h.agent.Step(context.Background())
 
-	if got := h.agent.Current; got != "sleeping" {
-		t.Errorf("sleeping 时不应被 @ 打断，实际 %s", got)
-	}
-	if len(h.agent.Stream) <= before {
-		t.Error("sleeping 时收到 @ 应留下记录（延迟量是人格的一部分）")
-	}
-	if len(h.agent.Deferred) == 0 {
-		t.Error("事件应被延迟而不是丢弃")
+			if got := h.agent.Current; got != initial {
+				t.Errorf("收到 @ 不该改变状态，期望 %s，实际 %s", initial, got)
+			}
+			if len(h.agent.Stream) <= before {
+				t.Error("收到 @ 应留下记录")
+			}
+		})
 	}
 }
 

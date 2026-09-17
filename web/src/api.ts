@@ -55,7 +55,6 @@ export interface Snapshot {
   state: string
   mood: Mood
   thinking: boolean
-  deferred: number
   call_count: number
   stream: StreamEntry[] | null
   last_dispatch?: Dispatch
@@ -71,40 +70,34 @@ export interface Health {
 export interface StateMeta {
   label: string
   hint: string
-  /** 该状态是否能看到 QQ（对应 State.Visibility.QQ）。 */
+  /** 该状态是否订阅 QQ（对应 State.Channels 含 ChanQQ）。 */
   seesQQ: boolean
-  /** 是否不可打断（对应 State.Uninterruptible，如 sleeping）。 */
-  uninterruptible: boolean
   accent: string
 }
 
 export const STATE_META: Record<string, StateMeta> = {
   scrolling_phone: {
     label: '刷手机',
-    hint: '唯一看得到 QQ 的状态',
+    hint: '订阅 QQ，驻留期间消息持续可见',
     seesQQ: true,
-    uninterruptible: false,
     accent: 'var(--accent)',
   },
   idle: {
     label: '发呆',
     hint: '什么都没做',
     seesQQ: false,
-    uninterruptible: false,
     accent: 'var(--muted)',
   },
   working: {
     label: '干活',
     hint: '精力随时间消耗',
     seesQQ: false,
-    uninterruptible: false,
     accent: 'var(--ok)',
   },
   sleeping: {
     label: '睡觉',
-    hint: '不可打断，被 @ 只记下延迟处理',
+    hint: '不订阅 QQ，手机响了也看不见',
     seesQQ: false,
-    uninterruptible: true,
     accent: 'var(--sleep)',
   },
 }
@@ -115,7 +108,6 @@ export function stateMeta(name: string): StateMeta {
       label: name,
       hint: '未在状态表中登记',
       seesQQ: false,
-      uninterruptible: false,
       accent: 'var(--muted)',
     }
   )

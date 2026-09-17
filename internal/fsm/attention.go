@@ -24,7 +24,7 @@ type Ticker interface {
 // 只暴露文本，不暴露消息结构：状态机不需要知道消息的 ID、来源、
 // 重要性这些记忆层的概念。**被门控的是信息，不是工具**（R7 修订）。
 type Attention interface {
-	// Scan 模拟"解锁手机扫一眼"：返回最近 n 条未读消息的文本并推进已读游标。
+	// Scan 取最近 n 条**未读**消息的文本并推进已读游标。
 	Scan(n int) []string
 	// Browse 向前翻页，返回更早的 n 条（§2.3 的两级读取）。
 	Browse(n int) []string
@@ -32,22 +32,54 @@ type Attention interface {
 	Unread() int
 }
 
-// scanOnEnterN 是进入"看 QQ"时扫一眼的条数。
+// defaultFeedLimit 是单次泵入的条数上限。
 //
 // 5 条是初值：再多会挤占 prompt，再少不像真的看了一眼。
-// ponytail: 硬编码常量，需要按人格调时挪进状态表字段。
-const scanOnEnterN = 5
+// ponytail: 硬编码常量，需要按人格调时挪进状态表字段（FeedLimit）。
+const defaultFeedLimit = 5
+
+// Pump 用当前状态订阅的通道喂一次数据：有新消息就写进意识流。
+//
+// 这是"状态持续"的机制落点。订阅在**整个驻留期间**生效，由 Step
+// 每 tick 调一次，因此"刷手机时来了一条消息"会被立刻看见，而不是
+// 只在进入那一刻读一把。
+//
+// 静默：没有新消息时不写任何记录。它在每个 tick 都被调用，若像
+// ReadPhone 那样写"没有新消息"，意识流会被这句废话淹没。
+//
+// 只能在 agent 自己的 goroutine 里调用（R1）。
+func (a *Agent) Pump() {
+	if a.attention == nil {
+		return
+	}
+	s := a.states[a.Current]
+	if !s.Subscribes(ChanQQ) {
+		return
+	}
+	limit := s.FeedLimit
+	if limit <= 0 {
+		limit = defaultFeedLimit
+	}
+	for _, m := range a.attention.Scan(limit) {
+		// 这里是消息正文进入模型视野的路径之一，可见性门控在上面。
+		a.appendStreamKind(KindObservation, m)
+	}
+}
 
 // ReadPhone 读手机：把最近 n 条未读放进意识流。
+//
+// 与 Pump 的区别：这是**显式**读一次（进入状态时"解锁扫一眼"，或
+// 工具调用），会如实写下"没有新消息"这种观察；Pump 是每 tick 的
+// 静默泵入。两者共用可见性门控。
 //
 // 只能在 agent 自己的 goroutine 里调用（R1）——它由状态表的 OnEnter
 // 触发，天然满足。
 //
-// 若当前状态声明了 QQ 不可见，则不读任何内容：这正是"信息可见性"
+// 若当前状态没订阅 QQ，则不读任何内容：这正是"信息可见性"
 // 的落点（R7 修订）。工具本身没有被封锁，被门控的是信息。
 func (a *Agent) ReadPhone(n int) {
-	if !a.states[a.Current].Visibility.QQ {
-		// 不在看 QQ 的状态：不读，但要留下"有未读"这个事实。
+	if !a.states[a.Current].Subscribes(ChanQQ) {
+		// 没在看 QQ：不读，但要留下"有未读"这个事实。
 		if a.attention != nil {
 			if unread := a.attention.Unread(); unread > 0 {
 				a.appendStreamKind(KindObservation, fmt.Sprintf("手机上有 %d 条未读，但现在不想看", unread))
@@ -71,9 +103,9 @@ func (a *Agent) ReadPhone(n int) {
 
 // BrowsePhone 向前翻页（§2.3 的第二级读取）。
 //
-// 与 ReadPhone 一样，受 Visibility.QQ 门控。
+// 与 ReadPhone 一样，受订阅门控。
 func (a *Agent) BrowsePhone(n int) []string {
-	if a.attention == nil || !a.states[a.Current].Visibility.QQ {
+	if a.attention == nil || !a.states[a.Current].Subscribes(ChanQQ) {
 		return nil
 	}
 	return a.attention.Browse(n)

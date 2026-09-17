@@ -156,6 +156,35 @@ func TestNightAndEnergyRaiseSleepWeight(t *testing.T) {
 	}
 }
 
+// TestUnreadDrivesAnnoyed 验证 memory.md §2.2 的"未读推高烦躁"真的接上了。
+//
+// 这是本轮补上的缺口：此前 Annoyed **只有衰减、没有任何增长**，
+// 文档里那句话是空话。当时反应通道是 @ 抢占，掩盖了它；抢占取消后
+// 积累成了唯一的反应通道——没有它，消息再多人格也毫无反应。
+func TestUnreadDrivesAnnoyed(t *testing.T) {
+	a, _ := newAgentWithFakeAttention(t) // 队列里 2 条，低于免烦阈值
+	a.Current = "working"                // 不订阅 QQ：烦躁不该依赖"看没看"
+
+	annoy := func() float64 { return a.Mood.Annoyed }
+
+	// 未读在免烦阈值内：不增长。
+	a.Mood.Annoyed = 0
+	a.decayMood()
+	if got := annoy(); got > 0 {
+		t.Errorf("未读在免烦阈值内不该推高烦躁，实际 %.3f", got)
+	}
+
+	// 越过阈值：应当持续堆积（把注意力接口换成大队列）。
+	a.attention = &fakeAttention{msgs: make([]string, 20)}
+	a.Mood.Annoyed = 0
+	for i := 0; i < 10; i++ {
+		a.decayMood()
+	}
+	if got := annoy(); got <= 0 {
+		t.Error("未读远超阈值时烦躁应当堆积（§2.2：99+ 推高烦躁）")
+	}
+}
+
 // TestMoodRatesInjectable 验证衰减率是人格参数、可注入。
 func TestMoodRatesInjectable(t *testing.T) {
 	fast := newQuietAgent(t, 1, MoodRates{Energy: 1.0})

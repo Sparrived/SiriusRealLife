@@ -69,3 +69,38 @@ func (m *Mood) Clamp() {
 		}
 	}
 }
+
+// unreadAnnoyFree 是"不引起烦躁"的未读条数。
+//
+// 几条群消息不该让人烦——手机上有三五条未读是常态。
+const unreadAnnoyFree = 5
+
+// unreadAnnoyRate 是每多一条未读、每 tick 增加的烦躁。
+//
+// 与 DefaultMoodRates().Annoyed（100/240 ≈ 0.4167/tick）共同决定
+// 平衡点：烦躁增长 (unread-5)*rate，衰减 0.4167/tick，故未读约 13 条
+// 时收支相抵，再多就会持续堆积——"红点越堆越烦，终于去看手机"。
+//
+// 为什么必须存在：曾经 Annoyed **只有衰减、没有任何增长**，于是
+// memory.md §2.2 的"99+ 推高烦躁"是句空话。当时反应通道是 @ 抢占，
+// 掩盖了这个缺口；抢占取消后它是唯一的反应通道，缺了它消息再多
+// 人格也毫无反应。调它要重跑 TestUnreadDrivesAnnoyed。
+const unreadAnnoyRate = 0.05
+
+// reactToUnread 按未读堆积推高烦躁（memory.md §2.2）。
+//
+// 不受可见性门控：这是"知道手机上有多少条红点"，不是"看到内容"。
+// 满手机未读的烦躁正该发生在她**没**看手机的时候。
+//
+// 只能在 agent 自己的 goroutine 里调用（R1）。
+func (a *Agent) reactToUnread() {
+	if a.attention == nil {
+		return
+	}
+	excess := a.attention.Unread() - unreadAnnoyFree
+	if excess <= 0 {
+		return
+	}
+	a.Mood.Annoyed += float64(excess) * unreadAnnoyRate
+	a.Mood.Clamp()
+}

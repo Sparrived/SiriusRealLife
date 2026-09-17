@@ -72,21 +72,18 @@ func TestQQVisibleOnlyInScrollingPhone(t *testing.T) {
 	}
 }
 
-// TestEnteringScrollingPhoneReadsQQ 验证 OnEnter 真的触发了读取：
-// 进入"看 QQ"状态后，意识流里应出现未读消息。
+// TestEnteringScrollingPhoneReadsQQ 验证"状态 = 一段订阅"：
+// 进入订阅了 QQ 的状态后，泵入会把未读消息带进意识流。
 func TestEnteringScrollingPhoneReadsQQ(t *testing.T) {
 	a, store := newAgentWithStore(t, "working")
 	store.Ingest(Message{From: "小红", Text: "在吗"})
 
-	// 走真实的抢占路径：被 @ → 切到 scrolling_phone → 触发 OnEnter。
-	a.Events() <- fsm.Event{Kind: fsm.EventMention}
-	a.Step(context.Background())
+	// 走真实路径：先推一个 tick 让它进入订阅状态，再泵一次。
+	a.Current = "scrolling_phone"
+	a.Pump()
 
-	if got := a.Current; got != "scrolling_phone" {
-		t.Fatalf("被 @ 后应进入 scrolling_phone，实际 %s", got)
-	}
 	if got := streamText(a); !strings.Contains(got, "在吗") {
-		t.Fatalf("进入看 QQ 状态应读取未读消息，实际意识流：%s", got)
+		t.Fatalf("进入订阅状态后应泵入未读消息，实际意识流：%s", got)
 	}
 }
 
