@@ -252,16 +252,16 @@ func (s *Store) Dropped() int {
 	return s.dropped
 }
 
-// Scan 模拟"解锁手机扫一眼"：返回**最近** n 条未读消息，并推进游标（§2.3）。
+// scanMessages 模拟"解锁手机扫一眼"：返回**最近** n 条未读消息，并推进游标（§2.3）。
 //
 // 是"最近"而不是"最旧"：看手机看到的是屏幕底下那几条新消息。
 // 已读游标是关键——没有它，退出再进入"看 QQ"会返回同样内容、原地空转。
 // 返回按时间正序，便于直接拼进 prompt。
 //
 // ponytail: 单个单调游标，若未读超过 n，被跳过的中间那几条会被记成"已读"
-// 而不再出现在 Scan 里（仍可用 Browse 翻到）。上限是"扫一眼只扫最新几条"；
+// 而不再出现在扫描里（仍可用翻页读到）。上限是"扫一眼只扫最新几条"；
 // 升级路径是改成逐条已读位图。
-func (s *Store) Scan(n int) []Message {
+func (s *Store) scanMessages(n int) []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -293,12 +293,12 @@ func (s *Store) Cursor() MessageID {
 	return s.cursor
 }
 
-// Browse 主动向前翻页（§2.3 的翻阅工具）。
+// browseMessages 主动向前翻页（§2.3 的翻阅工具）。
 //
-// 与 Scan 的区别：Scan 是"解锁手机扫一眼"（拿未读、推进已读游标）；
-// Browse 是"往上翻聊天记录"（拿更早的**已读**内容，回退浏览位置）。
+// 与 scanMessages 的区别：那是"解锁手机扫一眼"（拿未读、推进已读游标）；
+// 这是"往上翻聊天记录"（拿更早的**已读**内容，回退浏览位置）。
 // 两者各有自己的游标，否则"扫一眼"与"翻旧账"会互相打架。
-func (s *Store) Browse(n int) []Message {
+func (s *Store) browseMessages(n int) []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

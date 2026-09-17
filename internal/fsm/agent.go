@@ -68,6 +68,7 @@ type Agent struct {
 	lastRecord    DispatchRecord
 	thinking      context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
 	observe       func(Snapshot)
+	attention     Attention
 }
 
 // Options 是构造 Agent 的参数。种子显式传入使 30-tick 验收可复现（R3）。
@@ -88,6 +89,9 @@ type Options struct {
 	// 否则就是跨 goroutine 读写竞态。Observe 由 agent 自己的 goroutine
 	// 调用，观察者只拿到拷贝。
 	Observe func(Snapshot)
+	// Attention 提供"看 QQ"所需的读取能力。为 nil 时进入
+	// scrolling_phone 不会读到任何消息（离线测试用）。
+	Attention Attention
 }
 
 // Snapshot 是 agent 状态的值快照。
@@ -165,6 +169,7 @@ func New(opt Options) (*Agent, error) {
 		log:           logger.With("agent", opt.Name),
 		cooldownUntil: map[StateName]Tick{},
 		observe:       opt.Observe,
+		attention:     opt.Attention,
 		Mood:          Mood{Energy: 80, Annoyed: 0, Curious: 60},
 	}
 	a.enter(initial, "init")

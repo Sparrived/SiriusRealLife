@@ -78,7 +78,7 @@ func TestScanAdvancesCursor(t *testing.T) {
 		s.Ingest(Message{Text: fmt.Sprintf("msg %d", i)})
 	}
 
-	first := s.Scan(3)
+	first := s.scanMessages(3)
 	if len(first) != 3 {
 		t.Fatalf("首次扫一眼返回 %d 条, 期望 3", len(first))
 	}
@@ -94,7 +94,7 @@ func TestScanAdvancesCursor(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		s.Ingest(Message{Text: fmt.Sprintf("新消息 %d", i)})
 	}
-	second := s.Scan(3)
+	second := s.scanMessages(3)
 	if len(second) != 2 {
 		t.Fatalf("第二次扫一眼返回 %d 条, 期望 2（只剩 2 条新的）", len(second))
 	}
@@ -106,7 +106,7 @@ func TestScanAdvancesCursor(t *testing.T) {
 		}
 	}
 	// 没有新消息时再扫应当为空。
-	if got := s.Scan(3); len(got) != 0 {
+	if got := s.scanMessages(3); len(got) != 0 {
 		t.Errorf("没有新消息时应返回空，得到 %d 条", len(got))
 	}
 }
@@ -120,7 +120,7 @@ func TestUnreadCountOnlyCountsAfterCursor(t *testing.T) {
 	if got := s.UnreadCount(); got != 5 {
 		t.Fatalf("未读计数 = %d, 期望 5", got)
 	}
-	s.Scan(5)
+	s.scanMessages(5)
 	if got := s.UnreadCount(); got != 0 {
 		t.Fatalf("扫完后未读计数 = %d, 期望 0", got)
 	}
@@ -133,9 +133,9 @@ func TestBrowsePagesBackwards(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		s.Ingest(Message{Text: fmt.Sprintf("msg %d", i)})
 	}
-	s.Scan(3) // 看了最新 3 条（ID 8,9,10）
+	s.scanMessages(3) // 看了最新 3 条（ID 8,9,10）
 
-	page1 := s.Browse(3)
+	page1 := s.browseMessages(3)
 	if len(page1) != 3 {
 		t.Fatalf("翻页返回 %d 条, 期望 3", len(page1))
 	}
@@ -145,7 +145,7 @@ func TestBrowsePagesBackwards(t *testing.T) {
 			t.Errorf("翻到 ID=%d, 不应 >= 游标 %d", m.ID, s.Cursor())
 		}
 	}
-	page2 := s.Browse(3)
+	page2 := s.browseMessages(3)
 	// 第二页不能与第一页重叠。
 	for _, a := range page1 {
 		for _, b := range page2 {

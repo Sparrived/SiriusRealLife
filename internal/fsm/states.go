@@ -17,6 +17,10 @@ func MVPStates() []State {
 			Visibility: Visibility{QQ: true},
 			OnEnter: func(a *Agent) {
 				a.appendStream("拿起手机刷一刷")
+				// 进入时"解锁扫一眼"：把最近几条未读放进意识流。
+				// 注意读的是**信息**，不是工具——read_qq 之类的工具在
+				// 别的状态下依然可用，只是没东西显现（R7 修订）。
+				a.ReadPhone(scanOnEnterN)
 			},
 		},
 		{
