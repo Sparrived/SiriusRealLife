@@ -67,6 +67,7 @@ type Agent struct {
 	log           *slog.Logger
 	lastRecord    DispatchRecord
 	thinking      context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
+	observe       func(Snapshot)
 }
 
 // Options 是构造 Agent 的参数。种子显式传入使 30-tick 验收可复现（R3）。
@@ -81,6 +82,49 @@ type Options struct {
 	// StartTick 是起始 tick（1 tick = 1 游戏分钟，故 540 = 09:00）。
 	// 省略则从 0（游戏内 00:00）开始。这是 R8 时钟的唯一入口。
 	StartTick Tick
+	// Observe 在每次 tick 与事件处理后调用，参数是状态的**值快照**。
+	//
+	// 存在的理由是 R1：外部（HTTP/SSE）绝不能直接读 agent 字段，
+	// 否则就是跨 goroutine 读写竞态。Observe 由 agent 自己的 goroutine
+	// 调用，观察者只拿到拷贝。
+	Observe func(Snapshot)
+}
+
+// Snapshot 是 agent 状态的值快照。
+//
+// 传值而非指针：观察者拿到之后与 agent 再无共享，不可能反向改写。
+type Snapshot struct {
+	Now       Tick
+	Current   StateName
+	Mood      Mood
+	Stream    []StreamEntry
+	CallCount int
+	Deferred  int
+	Thinking  bool
+	Last      DispatchRecord
+}
+
+// snapshot 取一份当前状态的值拷贝（只能在 agent 自己的 goroutine 里调）。
+func (a *Agent) snapshot() Snapshot {
+	stream := make([]StreamEntry, len(a.Stream))
+	copy(stream, a.Stream)
+	return Snapshot{
+		Now:       a.Now,
+		Current:   a.Current,
+		Mood:      a.Mood,
+		Stream:    stream,
+		CallCount: a.CallCount,
+		Deferred:  len(a.Deferred),
+		Thinking:  a.IsThinking(),
+		Last:      a.lastRecord,
+	}
+}
+
+// emit 在配置了 Observe 时推送快照。
+func (a *Agent) emit() {
+	if a.observe != nil {
+		a.observe(a.snapshot())
+	}
 }
 
 // New 构造一个 Agent。返回的 agent 尚未运行，需调用 Run 或 Step。
@@ -120,6 +164,7 @@ func New(opt Options) (*Agent, error) {
 		chatter:       opt.Chatter,
 		log:           logger.With("agent", opt.Name),
 		cooldownUntil: map[StateName]Tick{},
+		observe:       opt.Observe,
 		Mood:          Mood{Energy: 80, Annoyed: 0, Curious: 60},
 	}
 	a.enter(initial, "init")
@@ -218,11 +263,13 @@ func (a *Agent) Step(ctx context.Context) {
 			a.log.Warn("dispatch_failed", slog.String("err", err.Error()))
 			// 延长停留，否则每个 tick 都会重试。
 			a.dwellUntil = a.Now + 1
+			a.emit()
 			return
 		}
 		a.lastRecord = rec
 		a.enter(next, "timeout")
 	}
+	a.emit()
 }
 
 // drainEvents 非阻塞地处理所有待处理事件。
@@ -286,6 +333,7 @@ func (a *Agent) Run(ctx context.Context, clock <-chan struct{}) error {
 		case ev := <-a.events:
 			// 事件立即处理，不必等到下一 tick。
 			a.handleEvent(ctx, ev)
+			a.emit()
 		}
 	}
 }

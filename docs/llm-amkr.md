@@ -55,15 +55,21 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 管理页面不自己写，直接反代 AMKR 自带的那套（`/ui/`）。这是**部署期约束**，实现时要守住：
 
-- Go 在 `/amkr/` 挂一个 `httputil.ReverseProxy` 转发到 AMKR，**路径 1:1 透传，不改写任何段**。AMKR 前端从当前页面 URL 反推 API 基址（`apiBase()` 取 `/ui/` 之前的部分），重写掉这段会让所有管理请求打到错误路径
-- **必须锁定到含 `apiBase()` 的那个 AMKR 版本**（写入 `docker-compose.yml` 的 `image:` 标签，不要用 `latest`）。`v4.1.0`（当前正式版）**没有**这个改动，它随下一个版本发布；接入时填那个 tag。旧版前端用根绝对路径（`fetch("/api/settings")`），挂在 `/amkr/` 下会一律 404 —— 「不改写路径」这条约定与 `v4.1.0` 及更早镜像不兼容。升级 AMKR 时先确认新版本的 `/ui/` 仍从页面路径推导基址，再改标签
+- **浏览器侧地址必须是 `/amkr/ui/`（不能改），上游侧必须剥掉 `/amkr` 前缀。** 两件事都要做，理由不同：
+  - 浏览器：AMKR 前端从当前页面 URL 反推 API 基址（`apiBase()` 取 `/ui/` 之前的部分），所以页面必须在 `/amkr/ui/` 下，它才会把请求发到 `/amkr/api/*`。**不能**把 `/amkr` 改写掉，否则前端会去请求 Sirius 根路径的 `/api/*`。
+  - 上游：独立运行的 AMKR 在**根路径**提供服务（`/health`、`/ui/`、`/api/*`）。**实测 `/amkr/ui/index.html` 直连 AMKR 返回 404** —— 因为 `mount_app()` 是 Python 进程内挂载，Go 反代用不到它。所以转发前必须 `TrimPrefix(path, "/amkr")`。
+
+  > ⚠️ 这里曾是本文档的一处错误：原文写"路径 1:1 透传，不改写任何段"。那只在**进程内挂载**（`mount_app`）的形态下成立，与两容器独立部署矛盾。已按实测更正，并有回归测试 `TestProxyStripsMountPrefix` 与真实服务端到端测试 `TestLiveAMKRProxy` 钉住。
+  >
+  > 连带结论：`apiBase()` 与"剥前缀"是**一对**，缺一不可。若用了没有 `apiBase()` 的旧版（前端发根绝对路径 `/api/*`），浏览器会把它发到 Sirius 自己，反代完全收不到。
+- **必须锁定到含 `apiBase()` 的那个 AMKR 版本**（写入 `docker-compose.yml` 的 `image:` 标签，不要用 `latest`）。`v4.1.0`（当前正式版）**没有**这个改动，它随下一个版本发布；接入时填那个 tag。旧版前端用根绝对路径（`fetch("/api/settings")`），挂在 `/amkr/` 下会一律 404 —— 即前端发出的请求根本不会经过 `/amkr/`，反代无从生效。升级 AMKR 时先确认新版本的 `/ui/` 仍从页面路径推导基址，再改标签
 - `Authorization: Bearer $AMKR_API_KEY` 由 Go **在服务端注入**，密钥下发给浏览器就等于泄露。注意 WebUI 自己**总是**会发 `Authorization`（首次访问时 localStorage 为空，实际值是空的 `Bearer `），因此注入必须用 **`Header.Set` 覆盖**，不能用 `Header.Add` 追加 —— Starlette 只会读**第一个** `Authorization` 头，追加时浏览器那个空凭据在前、反代注入的在后，所有管理请求都会 401
 - 必须 **403 掉 `/amkr/api/logs`、`/amkr/api/tool`、`/amkr/api/service/*`、`/amkr/api/integrations/*`**。这些是"操作宿主机"的运维接口（读日志文件、启停进程、注册系统服务、改写本机 Claude Code / Codex 配置），在容器里语义不成立，而且会写脏配置。更稳的做法是启动 AMKR 时加 `--no-ops`（写入配置字段 `ops_enabled`），一次关掉全部四条路径并返回 `404`，不必逐个拉黑；关掉后 `/health` 的 `ops_enabled` 为 `false`，可直接断言
 - `/amkr/` 等同于 AMKR 的完整管理权限。**在 Sirius 自己具备鉴权之前，服务只能绑 `127.0.0.1`**，不得暴露到局域网或公网
 - 不代理 AMKR 的 `/ws/events`：WebUI 不用它（只用 fetch + 轮询），没必要处理升级
 - AMKR 的配置文件、metrics sqlite、上游 key 都在 AMKR 那边管理，**不进本仓库**，Sirius 也不读它们
 
-> WebUI 是随 AMKR wheel 发布的预构建静态 ES module，无构建步骤。`index.html` 用相对路径引资源，因此挂在任意前缀下都能工作 —— 这正是"不改写路径"能成立的原因。
+> WebUI 是随 AMKR wheel 发布的预构建静态 ES module，无构建步骤。`index.html` 用相对路径引资源，因此在任意前缀下都能加载 —— 这是"浏览器侧保留 `/amkr`"能成立的原因（与"上游剥前缀"是两件独立的事，见上）。
 >
 > 注入正确（`Set` 覆盖）时**不会出现本地授权页**：WebUI 启动时先打 `/health`（免鉴权），看到 `local_auth_enabled` 为真就请求一次 `/api/settings` 探活，而这个请求会被反代覆盖成有效凭据，于是直接进主界面。如果看到验证页要 Key，说明注入没生效或用了 `Add` 追加（见上）。
 
