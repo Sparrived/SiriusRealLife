@@ -19,6 +19,23 @@ const workEnergyPerTick = 0.02
 // 人格失去"累"的层次，而所有单测照样通过。
 const sleepEnergyPerTick = 0.5
 
+// quietEnoughToLeave 是"刷手机刷够了"的判定：刷久了，或安静太久了。
+//
+// 两个条件缺一不可：
+//   - 刷了 8 tick：总得有个上限，否则会一直盯着屏幕
+//   - 或安静 20 tick：没人说话时刷手机是件无聊的事，该去干点别的
+//
+// 第二条就是"长时间没收到消息可以作为退出订阅的条件"。它是**建议性**
+// 的（进 prompt 作为理由，不替模型做决定）：模型看到"已经 20 tick 没有
+// 新消息了"，可以照旧赖着，也可以起身做别的。
+func quietEnoughToLeave(a *Agent) bool {
+	if a.Now-a.enteredAt >= 8 {
+		return true
+	}
+	quiet, _ := a.QuietFor()
+	return quiet >= 20
+}
+
 // MVPStates 返回 MVP 的四个状态（见 docs/roadmap.md §2）。
 //
 // 每个状态在这里声明三件事，也就是框架对 LLM 的**全部**约束：
@@ -39,11 +56,10 @@ func MVPStates() []State {
 			// 订阅 QQ：看的到消息，**且在整个驻留期间持续看到**
 			// （Step 每 tick 泵一次）。这是"状态 = 一段订阅"的落点。
 			Channels: []Channel{ChanQQ},
-			// 刷太久就该干点别的了。这条判断交给状态做（它知道"刷了
-			// 多久"），是否真的走交给 LLM —— 见 State.Until。
-			Until: func(a *Agent) bool {
-				return a.Now-a.enteredAt >= 8
-			},
+			// 刷太久、或安静太久，就该干点别的了。这条判断交给状态做
+			// （它知道"刷了多久""多久没人说话"），是否真的走交给 LLM
+			// —— 见 State.Until。
+			Until: quietEnoughToLeave,
 			OnEnter: func(a *Agent) {
 				a.appendStreamKind(KindAction, "拿起手机刷一刷")
 				// 进入时"解锁扫一眼"：显式读一次，会如实写下

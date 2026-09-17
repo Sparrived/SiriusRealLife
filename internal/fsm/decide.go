@@ -75,11 +75,17 @@ func (a *Agent) due() []Trigger {
 		})
 	}
 	if s.Until != nil && s.Until(a) {
-		out = append(out, Trigger{
-			Kind: TriggerUntil,
-			Text: untilHint + "。",
-			At:   a.Now,
-		})
+		// 理由要说**具体**，不能只说"该结束了"：模型得知道是什么迹象，
+		// 才能判断该不该当真。而 Until 只是一个 bool，说不出原因，因此
+		// 这里补上框架**确实知道**的事实——待了多久、安静了多久。
+		// 不说状态的内部逻辑（那是状态自己的事），只说外部可观测的量。
+		elapsed := a.Now - a.enteredAt
+		text := fmt.Sprintf("%s「%s」已经 %d tick 了。",
+			untilHint, stateLabel(a.Current), elapsed)
+		if quiet, ever := a.QuietFor(); ever && quiet > elapsed {
+			text += fmt.Sprintf("而且最近 %d tick 都没有新消息。", quiet)
+		}
+		out = append(out, Trigger{Kind: TriggerUntil, Text: text, At: a.Now})
 	}
 	if a.Now >= a.enteredAt+s.MaxTick {
 		out = append(out, Trigger{

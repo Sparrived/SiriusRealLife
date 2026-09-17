@@ -119,3 +119,23 @@ func (a *Agent) Unread() int {
 	}
 	return a.attention.Unread()
 }
+
+// QuietFor 返回"距离上一条消息过了多少 tick"。
+//
+// 第二个返回值为假表示**从来没收到过消息**：那不是"安静了很久"，
+// 而是"还没有人说过话"。两者对人格的含义完全不同（前者是"没人理我"，
+// 后者是"世界还没开始"），因此必须能区分，不能拿一个大数字糊过去。
+//
+// 为什么需要它：状态的 Until 只能看到心境与时间。而"我在这儿等了半天
+// 也没人说话"是一个**由外部输入推出的**事实——没有这个访问器，它根本
+// 无法被表达，于是"长时间没收到消息就退出订阅去干别的"也就写不出来。
+// 这正是用户要的那条退出条件（见 docs/architecture.md §2.1）。
+//
+// 只能在 agent 自己的 goroutine 里调用（R1）。
+func (a *Agent) QuietFor() (Tick, bool) {
+	if !a.everGotMessage {
+		// 从进入系统到现在都没人说过话，也应当算作"一直很安静"。
+		return a.Now, false
+	}
+	return a.Now - a.lastMessageAt, true
+}

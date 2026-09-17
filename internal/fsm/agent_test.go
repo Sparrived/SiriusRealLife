@@ -296,6 +296,73 @@ func TestPumpFeedsOnlySubscribed(t *testing.T) {
 	}
 }
 
+// TestQuietForTracksSilence 验证"安静多久了"能被量出来。
+//
+// 这条守的是"长时间没收到消息就退出订阅"这个退出条件的前提：
+// Until 只看得到心境与时间，若没有 QuietFor，"没人说话"这个**由外部
+// 输入推出的**事实根本无法表达，那条退出条件也就写不出来。
+func TestQuietForTracksSilence(t *testing.T) {
+	a := newTestAgent(t, fakeChatter{})
+	ctx := context.Background()
+
+	// 从来没收到过消息：要能区分出来，而不是报一个巨大的数字。
+	if _, ever := a.QuietFor(); ever {
+		t.Error("从未收到消息时第二个返回值应为 false")
+	}
+
+	a.Events() <- NewMessageEvent(IncomingMessage{From: "张三", Text: "在吗"})
+	a.Step(ctx)
+	// 事件在 Step 开头被 drain，**之后**才 Now++，因此这一步结束时
+	// 已经过去 1 tick。这不是误差，而是 tick 顺序的如实反映。
+	if got, ever := a.QuietFor(); !ever || got != 1 {
+		t.Fatalf("消息刚到，QuietFor = %d/%v，期望 1/true", got, ever)
+	}
+
+	// 再推 5 个 tick 没人说话。
+	for i := 0; i < 5; i++ {
+		a.Step(ctx)
+	}
+	if got, _ := a.QuietFor(); got != 6 {
+		t.Errorf("又过 5 tick 后 QuietFor = %d，期望 6", got)
+	}
+
+	// 又来一条：重新计。
+	a.Events() <- NewMessageEvent(IncomingMessage{From: "李四", Text: "喂"})
+	a.Step(ctx)
+	if got, _ := a.QuietFor(); got != 1 {
+		t.Errorf("又来消息后 QuietFor = %d，期望 1（只有本 tick）", got)
+	}
+}
+
+// TestPhoneLeavesWhenQuiet 验证用户要的那条退出条件真的生效：
+// 长时间没人说话时，刷手机这个状态会自己说"该结束的迹象出现了"。
+func TestPhoneLeavesWhenQuiet(t *testing.T) {
+	a, quit := newAgentWithFakeAttention(t)
+	defer quit()
+	a.Current = "scrolling_phone"
+	a.enteredAt = a.Now
+	a.Mood.Energy = 80
+
+	var phone State
+	for _, s := range MVPStates() {
+		if s.Name == "scrolling_phone" {
+			phone = s
+		}
+	}
+
+	// 刚进入：刷得不久，也没安静多久，不该走。
+	if phone.Until(a) {
+		t.Fatal("刚进入刷手机时不该说该走了")
+	}
+
+	// 安静超过阈值：该走了。
+	a.lastMessageAt = a.Now - 25
+	a.everGotMessage = true
+	if !phone.Until(a) {
+		t.Error("安静 25 tick 后，刷手机应当提示该结束了（长时间没人说话）")
+	}
+}
+
 // TestLLMDoesNotBlockTick 验证 R4：LLM 在途时状态机照常前进。
 func TestLLMDoesNotBlockTick(t *testing.T) {
 	slow := fakeChatter{delay: 200 * time.Millisecond, reply: "想了很久"}

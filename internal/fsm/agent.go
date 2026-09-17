@@ -102,18 +102,24 @@ type Agent struct {
 	decideAt Tick
 	// pending 是攒下的"为什么现在问你"（见 decide.go 的 Trigger）。
 	// 决策完成后清空；期间新到的理由会累加，让模型一次看到全部。
-	pending       []Trigger
-	cooldownUntil map[StateName]Tick
-	events        chan Event
-	chatter       Chatter
-	log           *slog.Logger
-	lastRecord    DispatchRecord
-	thinking      context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
-	observe       func(Snapshot)
-	attention     Attention
-	ticker        Ticker
-	moodRates     MoodRates
-	sink          MessageSink
+	pending []Trigger
+	// lastMessageAt 是最近一条消息到达的 tick，用于回答"安静多久了"。
+	//
+	// 配一个 bool 而不是拿 0 当"没有过消息"：tick 0 是完全合法的起始
+	// 时刻，用 0 当哨兵会让"开局一直没人说话"被误判成"刚刚有消息"。
+	lastMessageAt  Tick
+	everGotMessage bool
+	cooldownUntil  map[StateName]Tick
+	events         chan Event
+	chatter        Chatter
+	log            *slog.Logger
+	lastRecord     DispatchRecord
+	thinking       context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
+	observe        func(Snapshot)
+	attention      Attention
+	ticker         Ticker
+	moodRates      MoodRates
+	sink           MessageSink
 	// inFlightState 记录"哪次独白是为哪个状态发起的"。
 	// 与 thinking 区分：thinking 只管有没有在途调用，这个管结果该
 	// 归给谁。没有它，一次独白的结果可能在换状态之后才回来，
@@ -572,6 +578,10 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 func (a *Agent) ingestMessage(ev Event) {
 	m := decodeMessage(ev.Data)
 	m.Tick = a.Now
+	// 记下"刚刚有人说话"：这是 QuietFor 的唯一依据。放在 sink 之前，
+	// 因为即使没接记忆层，消息也确实到了。
+	a.lastMessageAt = a.Now
+	a.everGotMessage = true
 	// 状态只能由 agent 自己的 goroutine 改（R1），入队是记忆层的事。
 	if a.sink != nil {
 		a.sink.Accept(m)
