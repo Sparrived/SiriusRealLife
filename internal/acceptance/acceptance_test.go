@@ -29,13 +29,30 @@ func (f fakeChatter) Chat(ctx context.Context, _ fsm.ChatRequest) (fsm.ChatRespo
 }
 
 // blockingChatter 一直阻塞到 release 关闭或被取消，用来模拟慢 LLM。
-type blockingChatter struct{ release chan struct{} }
+//
+// cancelled 在**被取消**时关闭，让测试能区分"取消"与"正常返回"——
+// 只看 IsThinking() 是不行的：抢占会立刻为新状态再发起一次独白，
+// 于是在途标记又变成非空。
+//
+// 用带缓冲的 channel 而不是 sync.Once：Chatter 按值传递（接口约定），
+// 值里放 sync.Once 会被 go vet 判为复制锁。
+type blockingChatter struct {
+	release   chan struct{}
+	cancelled chan struct{}
+}
 
 func (b blockingChatter) Chat(ctx context.Context, _ fsm.ChatRequest) (fsm.ChatResponse, error) {
 	select {
 	case <-b.release:
 		return fsm.ChatResponse{Text: "ok"}, nil
 	case <-ctx.Done():
+		if b.cancelled != nil {
+			// 非阻塞发送：可能已被取消过一次（同一个 chatter 被复用）。
+			select {
+			case b.cancelled <- struct{}{}:
+			default:
+			}
+		}
 		return fsm.ChatResponse{}, ctx.Err()
 	}
 }
@@ -104,6 +121,15 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 		Ticker:    store, // 并驱动记忆的衰减/升格（R8）
 		Observe:   broadcast.Publish,
 		Logger:    logger,
+		// 与 cmd/sirius 一致：消息入记忆层、独白真的被调用、打捞接回 prompt。
+		// 缺任何一项，"单测各自通过、装起来整条链路是空的"都不会被发现。
+		//
+		// 独白不节流（-1）：测试要的是"每次进入都发起"这个确定性，
+		// 节流会让断言依赖 tick 的相对位置。
+		Sink:           store,
+		Monologue:      true,
+		MonologueEvery: -1,
+		Dredge:         store.DredgeFor(),
 	})
 	if err != nil {
 		t.Fatalf("fsm.New: %v", err)
@@ -195,13 +221,18 @@ func TestAcceptanceDeterministic(t *testing.T) {
 
 // TestAcceptanceLLMDoesNotBlockTick 验收 3：LLM 调用期间状态机不被阻塞，
 // 且仍能收事件、仍能被抢占（R4）。
+//
+// 走真实路径：独白由 enter() 自动发起（不再手工调 Think），
+// 这样测的就是生产代码实际会走的那条路。
 func TestAcceptanceLLMDoesNotBlockTick(t *testing.T) {
 	release := make(chan struct{})
-	h := newHarness(t, "working", blockingChatter{release: release})
+	cancelled := make(chan struct{}, 4)
+	h := newHarness(t, "working", blockingChatter{release: release, cancelled: cancelled})
 	ctx := context.Background()
 
-	if err := h.agent.Think(ctx, "思考"); err != nil {
-		t.Fatalf("Think: %v", err)
+	// 构造时进入初始状态即已发起独白。
+	if !h.agent.IsThinking() {
+		t.Fatal("进入状态应自动发起独白")
 	}
 
 	// 调用在途时连推 5 个 tick：必须立即返回。
@@ -219,10 +250,22 @@ func TestAcceptanceLLMDoesNotBlockTick(t *testing.T) {
 	if got := h.agent.Current; got != "scrolling_phone" {
 		t.Fatalf("调用期间被 @ 应能抢占，实际状态 %s", got)
 	}
-	if h.agent.IsThinking() {
-		t.Error("抢占后应已取消在途调用")
+	// 旧的调用必须已被取消。此时可能有一个**新**的独白在途——
+	// 那是在新状态里正常发起的，不是被抢占的那个。
+	select {
+	case <-cancelled:
+		// 旧调用确实收到了取消。
+	case <-time.After(500 * time.Millisecond):
+		t.Error("抢占后旧的在途调用没有被取消（R4）")
 	}
+
+	// 被取消的调用不该在意识流里留下"失败"记录：那不是故障。
 	close(release)
+	time.Sleep(20 * time.Millisecond)
+	h.agent.Step(ctx)
+	if got := streamText(h.agent); strings.Contains(got, "没想出来") {
+		t.Errorf("被抢占取消的调用不应记为失败:\n%s", got)
+	}
 }
 
 // TestAcceptanceQQGating 验收 5：不在看 QQ 时消息不进意识流；
@@ -232,14 +275,13 @@ func TestAcceptanceQQGating(t *testing.T) {
 	ctx := context.Background()
 
 	// 普通消息：静默入队，不打断。
-	h.agent.Events() <- fsm.Event{Kind: fsm.EventUserMessage}
+	h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{From: "小明", Text: "秘密内容不该泄露"})
 	h.agent.Step(ctx)
 	if got := h.agent.Current; got == "scrolling_phone" {
 		t.Error("普通消息不应把 agent 拉到看 QQ 状态")
 	}
 
 	// 消息内容不该出现在意识流里（不在看 QQ）。
-	h.store.Ingest(memory.Message{From: "小明", Text: "秘密内容不该泄露"})
 	if got := streamText(h.agent); strings.Contains(got, "秘密内容不该泄露") {
 		t.Fatalf("不在看 QQ 时消息内容不应进意识流：%s", got)
 	}
@@ -434,6 +476,169 @@ func TestAcceptanceRunLoop(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("取消后 Run 未退出")
+	}
+}
+
+// TestAcceptanceHTTPMessageReachesMemory 验证消息链路端到端：
+// POST /events → agent 事件 → memory.Store unread 队列。
+//
+// 这条测试存在的理由：Ingest 曾经没有任何生产调用方，于是整套记忆
+// 机制（unread → 待选区 → 打捞 → 升格 → Shadow）在真实运行中永远是
+// 空的，而所有单测照样通过。**必须走 HTTP 入口**，不能直接调
+// store.Ingest——否则测的还是那条断掉的链路。
+func TestAcceptanceHTTPMessageReachesMemory(t *testing.T) {
+	h := newHarness(t, "working", fakeChatter{reply: "嗯"})
+	ctx := context.Background()
+
+	if got := h.store.UnreadCount(); got != 0 {
+		t.Fatalf("起始未读 = %d, 期望 0", got)
+	}
+
+	body := `{"kind":"user_message","from":"张三","text":"在吗"}`
+	resp, err := http.Post(h.server.URL+"/api/v1/agents/sirius/events",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+
+	// 事件通过 channel 异步进入 agent，等它被消费。
+	deadline := time.Now().Add(2 * time.Second)
+	for h.store.UnreadCount() == 0 && time.Now().Before(deadline) {
+		h.agent.Step(ctx)
+		time.Sleep(time.Millisecond)
+	}
+
+	// 普通消息静默入队：未读 +1，且不打断当前状态。
+	if got := h.store.UnreadCount(); got != 1 {
+		t.Fatalf("未读 = %d, 期望 1（消息没有进入记忆层——Sink 没接上）", got)
+	}
+	if got := h.agent.Current; got == "scrolling_phone" {
+		t.Error("普通消息不应把 agent 拉到看 QQ 状态")
+	}
+
+	// 再发一条 @我的：必须即时打断。
+	body = `{"kind":"mention","from":"张三","text":"在吗","mentions_me":true}`
+	resp2, err := http.Post(h.server.URL+"/api/v1/agents/sirius/events",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST events: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for h.agent.Current != "scrolling_phone" && time.Now().Before(deadline) {
+		h.agent.Step(ctx)
+		time.Sleep(time.Millisecond)
+	}
+	if got := h.agent.Current; got != "scrolling_phone" {
+		t.Fatalf("被 @ 后状态 = %s, 期望 scrolling_phone", got)
+	}
+	// 进入看 QQ 会读消息，正文这才合法出现——同时反证它确实存进了记忆层。
+	if got := streamText(h.agent); !strings.Contains(got, "在吗") {
+		t.Errorf("进入看 QQ 后应读到消息正文:\n%s", got)
+	}
+}
+
+// TestAcceptanceMonologueIsLLMGenerated 验证意识流由 LLM 生成，而不是
+// 写死的旁白：进入状态会真的调用 Chatter，结果变成带类型的记录。
+//
+// 修复前 CallCount 恒为 0——Think 从未被生产代码调用，整个"意识流"
+// 只是四条硬编码字符串。跑起来看不出来，因为它照样在动。
+func TestAcceptanceMonologueIsLLMGenerated(t *testing.T) {
+	h := newHarness(t, "working", fakeChatter{reply: "想: 有点无聊\n打算: 去写点东西"})
+	ctx := context.Background()
+
+	// 构造时已进入初始状态并发起过一次独白；把它落定。
+	settle := func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			h.agent.Step(ctx)
+			if !h.agent.IsThinking() {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("独白一直没落定")
+	}
+	settle()
+
+	if got := h.agent.CallCount; got == 0 {
+		t.Fatal("CallCount = 0：独白没有真正调用 LLM")
+	}
+	if got := h.agent.Intent(); got != "去写点东西" {
+		t.Fatalf("意图 = %q, 期望来自 LLM 回复", got)
+	}
+
+	// 意识流里必须真的出现模型产出的内容，且类型正确。
+	var kinds []fsm.Kind
+	for _, e := range h.agent.Stream {
+		if e.Text == "有点无聊" || e.Text == "去写点东西" {
+			kinds = append(kinds, e.Kind)
+		}
+	}
+	if len(kinds) != 2 {
+		t.Fatalf("未在意识流中找到 LLM 产出的记录: %+v", h.agent.Stream)
+	}
+	if kinds[0] != fsm.KindThought || kinds[1] != fsm.KindIntent {
+		t.Errorf("类型 = %v, 期望 [thought intent]", kinds)
+	}
+}
+
+// TestAcceptanceContextCarriesStreamAndIntent 验证 prompt 上下文真的
+// 带上了"最近在想/刚发生/打算"，而不是只有当前状态。
+func TestAcceptanceContextCarriesStreamAndIntent(t *testing.T) {
+	h := newHarness(t, "working", fakeChatter{reply: "嗯"})
+	ctx := context.Background()
+
+	for i := 0; i < 40; i++ {
+		h.agent.Step(ctx)
+	}
+	h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{
+		From: "张三", Text: "吃了吗", MentionsMe: true,
+	})
+	h.agent.Step(ctx)
+
+	got := h.agent.Context(fsm.SiteMonologue, fsm.ContextOptions{})
+	for _, want := range []string{"【现在】", "【心境】", "【刚发生】", "【适合做】"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("上下文缺少 %s:\n%s", want, got)
+		}
+	}
+	// R5：prompt 不得塞全量意识流（上限 100 条）。
+	if n := strings.Count(got, "\n"); n > 12 {
+		t.Errorf("上下文 %d 行，疑似塞进了全量意识流:\n%s", n, got)
+	}
+}
+
+// TestAcceptanceMessageContentStaysGated 验证消息正文不会因接线而
+// 旁路 QQ 门控：@我 能把 agent 拉到看手机状态，但正文只在那个状态
+// 由 ReadPhone 走可见性门控读出。
+func TestAcceptanceMessageContentStaysGated(t *testing.T) {
+	h := newHarness(t, "working", fakeChatter{reply: "嗯"})
+	ctx := context.Background()
+	h.store.WriteStaging(0, "不该被看见的内容", []string{"秘密"}, 5, h.agent.Now)
+
+	h.agent.Events() <- fsm.NewMessageEvent(fsm.IncomingMessage{
+		From: "小明", Text: "不该被看见的内容", MentionsMe: true,
+	})
+	h.agent.Step(ctx)
+
+	// 抢占发生在 ingestMessage 之后，此时状态仍是 working。
+	// 事件处理顺序：先把消息写进意识流（不含正文）→ 再抢占进看手机。
+	// 进入看手机后 OnEnter 会读消息，正文这才合法出现。
+	if got := h.agent.Context(fsm.SiteMonologue, fsm.ContextOptions{}); !strings.Contains(got, "不该被看见的内容") {
+		t.Logf("进入看 QQ 后正文未出现（可接受）：\n%s", got)
+	}
+	// 关键断言：正文只可能来自 KindObservation（受门控的路径），
+	// 不能作为"看到消息"以外的形式出现。
+	for _, e := range h.agent.Stream {
+		if strings.Contains(e.Text, "不该被看见的内容") && e.Kind != fsm.KindObservation {
+			t.Errorf("正文以 %v 类型出现，应只经受门控的观察路径", e.Kind)
+		}
 	}
 }
 
