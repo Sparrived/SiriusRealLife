@@ -32,7 +32,7 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 - SSE 推流转到 Vue，页面显示实时意识流 + 状态图（当前节点高亮）
 - `/amkr/` 反代可用，能在 Sirius 页面上切到 AMKR WebUI 配模型
 
-**记忆部分按 [`memory.md`](memory.md) §8 Phase 1 做**：unread 队列、`@我`/回复打断（带 `uninterruptible` guard）、已读游标、关键词打捞返回整段、记忆曲线 + Shadow、升格（源条目删除）。
+**记忆部分按 [`memory.md`](memory.md) §9 Phase 1 做**：unread 队列、`@我`/回复打断（带 `uninterruptible` guard）、已读游标、关键词打捞返回整段、记忆曲线 + Shadow、升格（源条目删除）。
 **Phase 1 不做**（顺序靠后，非放弃）：向量检索、LLM 整合、自我模型。
 
 ### 验收标准
@@ -46,14 +46,20 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 5. 不在 `scrolling_phone` 时 QQ 消息**不进 prompt**；被 @ 能打断；`sleeping` 时不打断但有记录
 6. 有记忆因长期不打捞而沉入 Shadow，且 Shadow 内容**不出现在 prompt**
 
-以上 6 条已由 [`internal/acceptance`](../internal/acceptance/acceptance_test.go) 逐条覆盖（10 条测试，装配方式与 `cmd/sirius` 一致）。另外补了两条原来没写进验收、但会悄悄坏掉的：
+以上 6 条已由 [`internal/acceptance`](../internal/acceptance/acceptance_test.go) 逐条覆盖（14 条测试，装配方式与 `cmd/sirius` 一致）。另外补了几条原来没写进验收、但会悄悄坏掉的：
 
 - **R3 可复现**：同种子跑 200 tick，状态序列必须逐 tick 一致
 - **tick 真的驱动记忆**：只推 agent 的 tick（不手动调 `Store.Tick`），1000 tick 后记忆必须已沉入 Shadow
+- **消息真的进记忆层**：走 `POST /events`，未读计数必须增长（`Store.Ingest` 曾经没有任何生产调用方）
+- **意识流真的由 LLM 生成**：`call_count > 0` 且记录带类型（`Agent.Think` 曾经同样没有调用方）
+- **意图跨状态存活**：换过状态后"打算做什么"仍在
+
+> 后三条的由来值得记住：前端、单测、日志全都正常，界面上意识流也一直在滚动——
+> 但整个系统其实只是一个状态机加四条硬编码旁白。**"看起来在动"不等于"链路是通的"。**
 
 ## 3. 跑通之后再考虑
 
-按 [`memory.md`](memory.md) §8 的分期，不承诺顺序：
+按 [`memory.md`](memory.md) §9 的分期，不承诺顺序：
 
 - **Phase 2**：向量库（§5.2：暴力余弦 + 两路融合，Go 内实现）、LLM 整合（event → consolidated）、自我模型 + 常驻 prompt、整合记忆参与检索
 - **Phase 3**：规模优化（ANN，若暴力余弦成为瓶颈）、多 agent 互动
@@ -75,6 +81,7 @@ MVP 的 4 个状态（QQ 可见性标在括号里）：
 | R7 工具可见性 | **已定** | 状态声明信息可见性 + 建议动作，非工具白名单。见 [`memory.md`](memory.md) §7.1 |
 | 向量库 | **已定** | **Sirius 自有资产**（AMKR 只提供 embedding 计算）。Go 内暴力余弦 + 关键词两路融合，不引外部向量库；Phase 2 落地。见 [`memory.md`](memory.md) §5.2 |
 | 任务名划分 | 待定 | 先用一个任务跑通，之后按调用点（状态分派 / 内心独白 / 工具解读）拆 |
+| 待选区写入 | **未落地** | "翻到的内容整批写入待选区"（LLM 生成关键词 + importance）需要 `tool_read` 调用点，而工具层 `read_app` 还没做。因此真实运行中 staging 恒为空、Shadow 不增长——升格与打捞的机制本身已实现且有测试。见 [`memory.md`](memory.md) §9 的待办 |
 | Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外。容器部署因此有一条硬约束：端口只能映射到宿主回环（见 `docker-compose.yml`） |
 | 持久化 | v1 全内存 | 重启即清零，Phase 1 够用。⚠️ **Phase 2 起向量必须落盘**：它是项目资产，且重算 embedding 等于重复付费调 AMKR。见 [`memory.md`](memory.md) §5.2 |
 | 前端设计风格 | **已定** | 实时观测仪表盘（非营销页）：单一强调色 + 发丝线分组 + 系统字体栈，`DESIGN_VARIANCE 6 / MOTION_INTENSITY 4 / VISUAL_DENSITY 6`。取值与理由见 [`web/README.md`](../web/README.md)，对比度由 `npm run check:contrast` 断言 |

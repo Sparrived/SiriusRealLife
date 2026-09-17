@@ -99,6 +99,8 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 
 **prompt 只读 `working` + `self-model` + 打捞结果。** 任何往 prompt 里塞全量历史的代码都是 bug。
 
+`working` 的载体是**带类型的意识流**（观察/想法/动作/打算），它是一份 append-only 日志；送进 LLM 的是从这份日志按调用点装配出的**视图**，组装规则见 [`memory.md`](memory.md) §8。日志与视图必须分开：日志要全、视图要有界。
+
 ### 2.6 数据流
 
 ```
@@ -128,7 +130,7 @@ SiriusRealLife 是一个**人格模拟器**。人格是一个**有限状态机 +
 
 ```
 cmd/sirius/          程序入口，只做装配（读配置、建 agent、起 http、起 tick 源），不放业务逻辑
-internal/fsm/        状态机核心：状态定义、分派器、tick 循环、心境、Attention/Ticker 缝口
+internal/fsm/        状态机核心：状态定义、分派器、tick 循环、心境、意识流、上下文装配、Attention/Ticker/Sink 缝口
 internal/llm/        LLM 客户端。唯一实现是 AMKR 的 OpenAI 兼容接口
 internal/memory/     记忆分层：staging / event / consolidated / self-model / Shadow
 internal/transport/  HTTP 路由 + SSE 推送 + AMKR WebUI 反代
@@ -136,7 +138,7 @@ internal/config/     环境变量配置与校验（含回环地址硬校验）
 internal/tick/       唯一的时间换算点（R8）：真实时间 → tick
 internal/acceptance/ roadmap §2 验收标准的端到端测试
 config/              状态表、权重、prompt 模板（尚未落地，见下）
-web/                 Vue 3 + Vite + TS 前端（尚未落地）
+web/                 Vue 3 + Vite + TS 前端
 docs/                本目录
 ```
 
