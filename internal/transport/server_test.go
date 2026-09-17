@@ -37,7 +37,7 @@ func TestStateEndpoint(t *testing.T) {
 	b.Publish(fsm.Snapshot{
 		Now: 42, Current: "working",
 		Mood:   fsm.Mood{Energy: 55, Annoyed: 3, Curious: 60},
-		Stream: []fsm.StreamEntry{{Seq: 42, State: "working", Text: "干活"}},
+		Stream: []fsm.StreamEntry{{Seq: 42, Kind: fsm.KindIntent, State: "working", Text: "干活"}},
 	})
 
 	rec := httptest.NewRecorder()
@@ -59,6 +59,42 @@ func TestStateEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"call_count"`) {
 		t.Error("响应缺少 snake_case 的 call_count")
+	}
+	// 意识流必须带 kind：前端据它区分"在想/在做/打算做"。
+	if !strings.Contains(rec.Body.String(), `"kind":"intent"`) {
+		t.Errorf("响应缺少意识流的 kind 字段: %s", rec.Body.String())
+	}
+}
+
+// TestStreamKindReachesClient 验证 Kind 真的穿过 API 到达客户端。
+//
+// 后端加了 Kind 而传输层忘了带上，是最容易漏的一环：Go 侧测试
+// 全绿，界面却仍然只有一团文本。
+func TestStreamKindReachesClient(t *testing.T) {
+	s, b := newTestServer(t)
+	kinds := []fsm.Kind{fsm.KindObservation, fsm.KindThought, fsm.KindAction, fsm.KindIntent}
+	want := []string{"observation", "thought", "action", "intent"}
+
+	var stream []fsm.StreamEntry
+	for i, k := range kinds {
+		stream = append(stream, fsm.StreamEntry{Seq: fsm.Tick(i), Kind: k, State: "idle", Text: "x"})
+	}
+	b.Publish(fsm.Snapshot{Now: 4, Current: "idle", Stream: stream})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/default", nil))
+
+	var got stateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if len(got.Stream) != len(want) {
+		t.Fatalf("流条数 = %d, 期望 %d", len(got.Stream), len(want))
+	}
+	for i, w := range want {
+		if got.Stream[i].Kind != w {
+			t.Errorf("第 %d 条 kind = %q, 期望 %q", i, got.Stream[i].Kind, w)
+		}
 	}
 }
 

@@ -6,38 +6,29 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Sparrived/SiriusRealLife/internal/fsm"
 )
 
 // CallSite 是调用点的稳定标识。
 //
+// 定义在 fsm 侧并在此别名：上下文装配（fsm.Context）要按调用点决定
+// 往 prompt 里放什么，所以调用点的归属是状态机；llm 只是使用者。
+// 各写一份枚举会让两边悄悄漂移——加调用点时忘改一边，装配出的
+// prompt 就会落进 default 分支。
+//
 // 分开的理由：换模型、调温度不需要改 Sirius 代码，只要在 AMKR WebUI 里
 // 改对应任务的配置。真实模型名**不出现在代码里**（R9）。
-type CallSite string
+type CallSite = fsm.CallSite
 
 const (
 	// SiteDispatch 状态分派：决定下一步做什么。
-	SiteDispatch CallSite = "dispatch"
+	SiteDispatch = fsm.SiteDispatch
 	// SiteMonologue 内心独白：写意识流。
-	SiteMonologue CallSite = "monologue"
+	SiteMonologue = fsm.SiteMonologue
 	// SiteToolRead 工具结果解读：把工具返回翻译成人话。
-	SiteToolRead CallSite = "tool_read"
+	SiteToolRead = fsm.SiteToolRead
 )
-
-// taskEnv 把调用点映射到它的环境变量名。
-//
-// 调用点 → 任务名的映射放在这张显式表里（v1 硬编码，允许 env 覆盖单条）。
-func (c CallSite) taskEnv() string {
-	switch c {
-	case SiteDispatch:
-		return "AMKR_TASK_DISPATCH"
-	case SiteMonologue:
-		return "AMKR_TASK_MONOLOGUE"
-	case SiteToolRead:
-		return "AMKR_TASK_TOOL_READ"
-	default:
-		return ""
-	}
-}
 
 // ConfigFromEnv 从环境变量读连接信息。
 //
@@ -64,7 +55,7 @@ func ConfigFromEnv() (Config, error) {
 //
 // 优先取该调用点的 env 覆盖，否则回落到默认模型。
 func ModelFor(site CallSite) string {
-	if name := site.taskEnv(); name != "" {
+	if name := site.TaskEnv(); name != "" {
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 			return v
 		}
