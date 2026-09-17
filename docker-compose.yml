@@ -9,6 +9,12 @@
 #   docker compose up --build
 #
 # 只暴露 Sirius 一个端口，且**绑在宿主回环**（见 ports 的说明）。
+#
+# 项目名必须小写：compose 拒绝大写（`-p SiriusRealLife` 会报
+# "must consist only of lowercase alphanumeric characters..."）。
+# 这里写死 name，让项目名不随目录名漂移；`-p` 仍可覆盖它，
+# 部署时统一用：docker compose -p siriusreallife ...
+name: siriusreallife
 
 services:
   amkr:
@@ -19,12 +25,28 @@ services:
     # （fetch("/api/settings")），挂在 /amkr/ 下不会经过反代。等 AMKR
     # 发布含该改动的版本后改成那个 tag。改动前 /amkr/ 页面能打开，
     # 但管理请求会落到 Sirius 自己的路由上（表现为 404 或空响应）。
-    image: ghcr.io/sparrived/auto-model-key-router:v4.1.0
+    #
+    # 用变量是为了让"镜像从哪来"可切换而不用改本文件：默认取的 ghcr
+    # 镜像目前是**私有**的，匿名与无凭据环境一律 denied（实测 403）。
+    # 换来源时在 .env 里覆盖 AMKR_IMAGE 即可，见部署文档。
+    image: ${AMKR_IMAGE:-ghcr.io/sparrived/auto-model-key-router:v4.1.0}
     restart: unless-stopped
-    # 关闭运维接口（读宿主机日志、启停进程、改写本机 Claude Code/Codex 配置）。
-    # 这些接口作用于"服务所在的这台机器"，在容器里语义不成立，返回 404
-    # 比逐个路径拉黑更可靠（docs/llm-amkr.md §4）。这是持久化设置，会写入配置。
-    command: ["amkr", "--host", "0.0.0.0", "--serve-foreground", "--no-ops"]
+    # ⚠️ 不要加 `--no-ops`。实测 v4.1.0 的 argparse 里**没有**这个参数，
+    # 带上会 "unrecognized arguments" 并 exit 2 无限重启。
+    #
+    # `--no-ops` 目前只存在于 AMKR 的**本地未提交改动**（main.py 新增了
+    # 该开关），既不在 PyPI 4.1.0，也不在 origin/master，因此也不可能在
+    # ghcr 镜像里。等它随版本发布后再改成
+    # ["amkr","--host","0.0.0.0","--serve-foreground","--no-ops"]。
+    # 在此之前运维接口由 Sirius 反代侧 403 兜住
+    # （internal/transport/proxy.go 的 blockedOpsPath，见 docs/llm-amkr.md §4）。
+    #
+    # `--serve-foreground` 是前台模式，容器里必须用它：
+    # 另一个 `--serve` 会 fork 到后台并让主进程退出，容器随即被判为结束
+    # 而无限重启（实测 RestartCount 涨到 9）。
+    # 注意该参数在 4.1.0 里是 `help=argparse.SUPPRESS`，`--help` 里看不到，
+    # 别因为"帮助里没有"就以为不存在。
+    command: ["amkr", "--host", "0.0.0.0", "--serve-foreground"]
     environment:
       # 容器内配置、metrics、日志都在 /data 下（AMKR 镜像用 XDG_CACHE_HOME
       # 把状态推到 /data/auto-model-key-router）。
@@ -78,7 +100,11 @@ services:
     ports:
       # ⚠️ 只绑宿主回环。写成 "8080:8080" 会把 /amkr/（AMKR 完整管理权限）
       # 暴露给整个网络 —— Sirius 自身还没有鉴权。
-      - "127.0.0.1:8080:8080"
+      #
+      # 宿主端口用变量：生产服务器上 8080 已被别的服务占用（实测
+      # sirius-pulse-v2-test 以 host 网络占着 0.0.0.0:8080），因此那里
+      # 用 SIRIUS_HOST_PORT=18080。本机开发保持 8080 不动。
+      - "127.0.0.1:${SIRIUS_HOST_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
       interval: 15s

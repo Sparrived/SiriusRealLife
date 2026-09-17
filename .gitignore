@@ -10,6 +10,10 @@ bin/
 .env
 .env.local
 
+# 部署连接文档：含服务器地址、端口与登录方式，仓库是公开的（AGENTS.md §4）
+docs/deploy-local.md
+docs/*-local.md
+
 # runtime data（向量库落盘，见 docs/memory.md §5.2）
 data/
 *.db
