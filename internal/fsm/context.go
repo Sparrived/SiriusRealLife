@@ -92,6 +92,7 @@ type ContextOptions struct {
 // 同一个装配结果，再各自追加追问。段落组成（每段可省略）：
 //
 //	【现在】时刻 / 状态 / 心境
+//	【手机】还有几条没看（有未读时才出现）
 //	【我是谁】自我模型（常驻）
 //	【最近在想】KindThought
 //	【刚发生】KindObservation + KindAction
@@ -111,6 +112,20 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 
 	fmt.Fprintf(&b, "【心境】精力 %.0f，烦躁 %.0f，好奇 %.0f。\n",
 		a.Mood.Energy, a.Mood.Annoyed, a.Mood.Curious)
+
+	// 未读：**作为事实陈述，不作为触发条件**（R12）。
+	//
+	// 为什么必须有这一段：意识流里"有人叫我"那条只在**到达时**写一次，
+	// 而【刚发生】只取最近 8 条。一条 20 tick 前到的消息早就被挤出窗口，
+	// 于是模型再也看不到"还有没看的消息"——它就无法产生"要不要去看看
+	// 手机"这个念头，只能靠碰巧又来了新消息。未读数是**持续存在的事实**，
+	// 必须每轮都告知（对应"如果 QQ 来消息了，应当在提示词告知"）。
+	//
+	// 订阅了 QQ 的状态（如刷手机）里，Pump 已经在 Step 里把消息泵走、
+	// 游标随之推进，因此这里自然为 0、整段不出现——不必特殊处理。
+	if n := a.Unread(); n > 0 {
+		fmt.Fprintf(&b, "【手机】还有 %d 条消息没看。\n", n)
+	}
 
 	if len(opt.SelfModel) > 0 {
 		fmt.Fprintf(&b, "【我是谁】%s\n", strings.Join(opt.SelfModel, "；"))

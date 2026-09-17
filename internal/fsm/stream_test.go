@@ -204,6 +204,32 @@ func TestContextSections(t *testing.T) {
 	}
 }
 
+// TestContextReportsUnread 验证"有未读消息"作为**持续事实**进入 prompt。
+//
+// 这条守的是一个很容易漏掉的缺口：消息到达时意识流里写的那句"有人叫我"
+// 只在到达那一刻写一次，而【刚发生】只取最近 8 条。一条 20 tick 前到的
+// 消息会被挤出窗口，此后模型再也看不到"还有没看的消息"——它就没法产生
+// "要不要去看看手机"这个念头，只能靠碰巧又来了新消息。
+//
+// 未读数是持续存在的事实，必须每轮都告知（这也是"如果 QQ 来消息了，
+// 应当在提示词告知"的落点）。同时它**不是**触发条件（R12）：说了不等于
+// 框架去换状态，只是让模型知道。
+func TestContextReportsUnread(t *testing.T) {
+	a, quit := newAgentWithFakeAttention(t) // 队列里 2 条未读
+	defer quit()
+
+	got := a.Context(SiteDispatch, ContextOptions{})
+	if !strings.Contains(got, "【手机】") || !strings.Contains(got, "2 条") {
+		t.Errorf("有未读时上下文应报告未读条数：\n%s", got)
+	}
+
+	// 读完（游标推进）之后整段应当消失，而不是写"0 条"。
+	a.attention.Scan(10)
+	if got := a.Context(SiteDispatch, ContextOptions{}); strings.Contains(got, "【手机】") {
+		t.Errorf("没有未读时不该出现【手机】段：\n%s", got)
+	}
+}
+
 // TestContextRespectsLimits 验证每段都有上限（R5）。
 func TestContextRespectsLimits(t *testing.T) {
 	a := newTestAgent(t, fakeChatter{})
