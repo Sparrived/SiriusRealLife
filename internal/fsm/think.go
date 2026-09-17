@@ -17,7 +17,7 @@ import (
 // 调用失败会以 EventLLMFailed 事件回来。
 //
 // 只能在 agent 自己的 goroutine 里调用（R1）。
-func (a *Agent) Think(ctx context.Context, prompt string) error {
+func (a *Agent) Think(ctx context.Context, req ChatRequest) error {
 	if a.chatter == nil {
 		return fmt.Errorf("fsm: 未配置 Chatter")
 	}
@@ -29,7 +29,7 @@ func (a *Agent) Think(ctx context.Context, prompt string) error {
 	a.thinking = cancel
 
 	go func() {
-		resp, err := a.chatter.Chat(callCtx, ChatRequest{Prompt: prompt})
+		resp, err := a.chatter.Chat(callCtx, req)
 		// 被取消（抢占/关停）时直接丢弃：这不是"失败"，不该往意识流里
 		// 记一条"没想出来"。结果会污染意识流，也会让抢占看起来像故障。
 		if callCtx.Err() != nil {

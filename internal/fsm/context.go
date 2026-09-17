@@ -145,8 +145,12 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 	// 追问：每个调用点的差异只在这里。
 	switch site {
 	case SiteMonologue:
-		b.WriteString("\n用一句话写下此刻的内心活动。可选前缀（想: / 做: / 打算:）标明类型；")
-		b.WriteString("如果对接下来有明确打算，就用「打算:」开头再写一行。不要解释，不要客套。")
+		// 明确要求 JSON，并把字段名写出来：schema 被路由忽略时
+		// （实测 wb2api 就是静默忽略），prompt 是唯一还在起作用的约束。
+		// 字段名必须与 monologueSchema 一致，改动要同步。
+		b.WriteString("\n以 JSON 回这一段内心活动，只要这三个字段：\n")
+		b.WriteString(`{"thought":"此刻在想什么","action":"正在做的动作，没有就填空串","intent":"接下来打算做什么，没有就填空串"}`)
+		b.WriteString("\n第一人称、口语、一两句就够。不要复述上面的设定，不要解释，不要客套。")
 	case SiteDispatch:
 		b.WriteString("\n接下来做什么？只回一个动作短语，不要解释。")
 	case SiteToolRead:

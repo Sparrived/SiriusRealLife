@@ -159,7 +159,7 @@ func TestLLMDoesNotBlockTick(t *testing.T) {
 	a := newTestAgent(t, 7, slow)
 	ctx := context.Background()
 
-	if err := a.Think(ctx, "思考"); err != nil {
+	if err := a.Think(ctx, ChatRequest{Prompt: "思考"}); err != nil {
 		t.Fatalf("Think: %v", err)
 	}
 	if !a.IsThinking() {
@@ -198,7 +198,7 @@ func TestPreemptCancelsInFlightLLM(t *testing.T) {
 	a := newTestAgent(t, 3, slow)
 	ctx := context.Background()
 
-	if err := a.Think(ctx, "思考"); err != nil {
+	if err := a.Think(ctx, ChatRequest{Prompt: "思考"}); err != nil {
 		t.Fatalf("Think: %v", err)
 	}
 	a.handleEvent(ctx, Event{Kind: EventMention})
@@ -212,10 +212,10 @@ func TestPreemptCancelsInFlightLLM(t *testing.T) {
 func TestSecondThinkRejected(t *testing.T) {
 	a := newTestAgent(t, 3, fakeChatter{delay: time.Second})
 	ctx := context.Background()
-	if err := a.Think(ctx, "第一次"); err != nil {
+	if err := a.Think(ctx, ChatRequest{Prompt: "第一次"}); err != nil {
 		t.Fatalf("第一次 Think 不应失败: %v", err)
 	}
-	if err := a.Think(ctx, "第二次"); err == nil {
+	if err := a.Think(ctx, ChatRequest{Prompt: "第二次"}); err == nil {
 		t.Fatal("在途时应拒绝第二次 Think")
 	}
 }

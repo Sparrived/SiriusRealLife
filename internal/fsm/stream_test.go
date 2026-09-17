@@ -49,6 +49,63 @@ func TestParseMonologue(t *testing.T) {
 			want: []Kind{KindThought},
 			text: []string{"有内容"},
 		},
+		{
+			// 实测：同一 prompt 下 AMKR 的 auto 路由回全角冒号。
+			// 只认半角会让意图被静默降级成普通想法。
+			name: "全角冒号",
+			in:   "想： 有点无聊\n打算： 去写点东西",
+			want: []Kind{KindThought, KindIntent},
+			text: []string{"有点无聊", "去写点东西"},
+		},
+		{
+			// 实测：模型会加粗标签。
+			name: "markdown 加粗标签",
+			in:   "**想：** 有点困\n**打算：** 早点睡",
+			want: []Kind{KindThought, KindIntent},
+			text: []string{"有点困", "早点睡"},
+		},
+		{
+			// "想做点什么" 不能被切成 "想" + "做点什么"。
+			name: "标签后无冒号则不作前缀",
+			in:   "想做点什么但没想好",
+			want: []Kind{KindThought},
+			text: []string{"想做点什么但没想好"},
+		},
+		{
+			name: "JSON 三字段",
+			in:   `{"thought":"有点无聊","action":"刷手机","intent":"去写代码"}`,
+			want: []Kind{KindThought, KindAction, KindIntent},
+			text: []string{"有点无聊", "刷手机", "去写代码"},
+		},
+		{
+			// 实测：模型常把 JSON 包进 markdown 围栏。
+			name: "JSON 带代码围栏",
+			in:   "```json\n{\"thought\":\"有点无聊\",\"action\":\"\",\"intent\":\"去写代码\"}\n```",
+			want: []Kind{KindThought, KindIntent},
+			text: []string{"有点无聊", "去写代码"},
+		},
+		{
+			// 实测：json_object 模式（或忽略 schema 的路由）下模型
+			// 自起字段名，deepseek 回了"内心活动"。
+			name: "JSON 字段名别名",
+			in:   `{"内心活动":"有点无聊"}`,
+			want: []Kind{KindThought},
+			text: []string{"有点无聊"},
+		},
+		{
+			name: "JSON answer 别名",
+			in:   `{"answer":"发会呆吧"}`,
+			want: []Kind{KindThought},
+			text: []string{"发会呆吧"},
+		},
+		{
+			// 合法 JSON 但字段全不认识：不当作 JSON 消费，
+			// 交给文本兜底，内容才不会被丢掉。
+			name: "JSON 无可用字段则走文本兜底",
+			in:   `{"foo":"这段内容不该消失"}`,
+			want: []Kind{KindThought},
+			text: []string{`{"foo":"这段内容不该消失"}`},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -30,6 +30,26 @@ const streamLimit = 100
 // 真实客户端在 internal/llm，只用标准库的 net/http（R9）。
 type ChatRequest struct {
 	Prompt string
+	// Schema 非空时请求上游返回符合它的 JSON（OpenAI 的
+	// response_format=json_schema, strict）。
+	//
+	// 这是**尽力而为**，不是保证：实测同一条 prompt 下，AMKR 的某些
+	// 路由（如 wb2api）会静默忽略 response_format 并照旧返回散文，
+	// 既不遵守也不报错。因此解析侧必须同时接受 JSON 与前缀两种形态，
+	// 见 parseMonologue。客户端不能假设路由支持它——路由是 AMKR 侧
+	// 决定的，可以随时切（R9）。
+	Schema *ResponseSchema
+}
+
+// ResponseSchema 描述一次结构化输出的期望形状。
+//
+// JSON Schema 用 json.RawMessage 而不是强类型结构：它是上游协议的
+// 形状，不是 Sirius 的领域模型，没必要在 Go 里再建模一遍。
+type ResponseSchema struct {
+	// Name 是 schema 名，strict 模式要求提供。
+	Name string
+	// Schema 是 JSON Schema 本体（object 根）。
+	Schema json.RawMessage
 }
 
 // ChatResponse 是一次 LLM 调用的结果。
@@ -327,7 +347,10 @@ func (a *Agent) maybeThink() {
 	}
 	// context.Background()：独白不绑定某次 tick，生命周期由
 	// cancelThinking 管（抢占时取消，见 R4）。
-	err := a.Think(context.Background(), a.Context(SiteMonologue, a.contextOptions()))
+	err := a.Think(context.Background(), ChatRequest{
+		Prompt: a.Context(SiteMonologue, a.contextOptions()),
+		Schema: &monologueSchema,
+	})
 	if err != nil {
 		// 起不来（多半是上一次独白还在途）：**绝不能**改写
 		// inFlightState —— 那会把在途结果错记到刚进入的这个状态名下。
