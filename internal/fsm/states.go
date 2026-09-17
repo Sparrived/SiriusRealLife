@@ -27,7 +27,7 @@ func MVPStates() []State {
 			// 看 QQ 就发生在这里：只有这个状态可见 QQ 消息。
 			Visibility: Visibility{QQ: true},
 			OnEnter: func(a *Agent) {
-				a.appendStream("拿起手机刷一刷")
+				a.appendStreamKind(KindAction, "拿起手机刷一刷")
 				// 进入时"解锁扫一眼"：把最近几条未读放进意识流。
 				// 注意读的是**信息**，不是工具——read_qq 之类的工具在
 				// 别的状态下依然可用，只是没东西显现（R7 修订）。
@@ -53,7 +53,7 @@ func MVPStates() []State {
 			Cooldown: 2,
 			Suggests: []string{"工作", "写东西"},
 			OnEnter: func(a *Agent) {
-				a.appendStream("开始干活")
+				a.appendStreamKind(KindAction, "开始干活")
 				// 成本与**这次要干多久**成正比，而不是每次扣一个固定值。
 				// 固定值曾经让精力长期为 0：working 一天要进入几十次，
 				// 每次扣 5 就是几百点，与"实际工作了多久"毫无关系。
@@ -89,7 +89,7 @@ func MVPStates() []State {
 				return m
 			},
 			OnEnter: func(a *Agent) {
-				a.appendStream("困了，睡一会")
+				a.appendStreamKind(KindAction, "困了，睡一会")
 			},
 			OnExit: func(a *Agent) {
 				a.Mood.Energy = 95

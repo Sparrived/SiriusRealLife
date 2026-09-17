@@ -2,6 +2,7 @@ package fsm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -12,8 +13,12 @@ import (
 // 这是 `working` 层的载体：prompt 只读它 + 长期层（R5）。
 // 完整分层（staging/event/consolidated/self-model/Shadow）见
 // docs/memory.md，由 internal/memory 实现并在 Phase 1 接入。
+//
+// Kind 让它成为**带类型的日志**而非流水账：装配器据此回答
+// "最近在想什么 / 做了什么 / 接下来打算做什么"（见 stream.go）。
 type StreamEntry struct {
 	Seq   Tick
+	Kind  Kind
 	State StateName
 	Text  string
 }
@@ -71,6 +76,28 @@ type Agent struct {
 	attention     Attention
 	ticker        Ticker
 	moodRates     MoodRates
+	sink          MessageSink
+	// inFlightState 记录"哪次独白是为哪个状态发起的"。
+	// 与 thinking 区分：thinking 只管有没有在途调用，这个管结果该
+	// 归给谁。没有它，一次独白的结果可能在换状态之后才回来，
+	// 从而被误记到新状态名下。
+	inFlightState StateName
+	// monologueOn 为真时，进入状态会异步发起一次内心独白。
+	monologueOn bool
+	// lastMonologueAt 是上次发起独白的 tick，用于节流。
+	//
+	// 配一个 bool 而不是拿 0 当"没发过"：tick 0 是完全合法的起始
+	// 时刻（StartTick 可为 0），用 0 当哨兵会让节流在最开始失效。
+	lastMonologueAt Tick
+	monologueSent   bool
+	// monologueEvery 是两次独白之间的最小间隔（tick）。
+	monologueEvery Tick
+	// ctxLimits 是上下文装配的条数上限。
+	ctxLimits ContextLimits
+	// selfModel 是常驻的自我认知（memory.md §6.2）。
+	selfModel []string
+	// dredge 按查询词打捞记忆（memory.md §5.1）。
+	dredge func(query []string, now Tick) []string
 }
 
 // Options 是构造 Agent 的参数。种子显式传入使 30-tick 验收可复现（R3）。
@@ -99,6 +126,32 @@ type Options struct {
 	Ticker Ticker
 	// MoodRates 是心境衰减率。零值用 DefaultMoodRates()。
 	MoodRates MoodRates
+	// Sink 收下外部消息，返回是否即时打断。为 nil 时消息只走
+	// 意识流、不进记忆层（离线测试用）。
+	//
+	// 由 memory.Store 隐式满足（见 message.go）。装配了它，消息才会
+	// 真正进入 unread 队列与待选区——否则记忆链路整条是空的。
+	Sink MessageSink
+	// Monologue 为真时，每次进入状态异步发起一次内心独白，
+	// 让意识流由 LLM 生成而不是写死的旁白。
+	//
+	// 注意它不改变 R4：独白是异步的，结果以事件回到 agent，
+	// 期间状态机照常前进、照常可被抢占。
+	Monologue bool
+	// MonologueEvery 是两次独白之间的最小 tick 间隔（成本闸门）。
+	//
+	// 0 = 用默认间隔（defaultMonologueEvery）；负值 = 不节流
+	// （每次进入状态都调用，调试用）。状态平均只停留几 tick，
+	// 不节流会变成每秒一次 LLM 调用。
+	MonologueEvery Tick
+	// ContextLimits 是上下文各段条数上限。零值用 DefaultContextLimits()。
+	ContextLimits ContextLimits
+	// SelfModel 是常驻 prompt 的自我认知（memory.md §6.2）。
+	SelfModel []string
+	// Dredge 按查询词打捞记忆（memory.md §5.1）。为 nil 则不打捞。
+	//
+	// now 是当前 tick：打捞要刷新记忆曲线，而记忆只认 tick（R8）。
+	Dredge func(query []string, now Tick) []string
 }
 
 // Snapshot 是 agent 状态的值快照。
@@ -173,20 +226,29 @@ func New(opt Options) (*Agent, error) {
 	}
 
 	a := &Agent{
-		Name:          opt.Name,
-		states:        states,
-		order:         opt.States,
-		Now:           opt.StartTick,
-		rng:           rand.New(rand.NewSource(opt.Seed)),
-		events:        make(chan Event, 64),
-		chatter:       opt.Chatter,
-		log:           logger.With("agent", opt.Name),
-		cooldownUntil: map[StateName]Tick{},
-		observe:       opt.Observe,
-		attention:     opt.Attention,
-		ticker:        opt.Ticker,
-		moodRates:     rates,
-		Mood:          Mood{Energy: 80, Annoyed: 0, Curious: 60},
+		Name:           opt.Name,
+		states:         states,
+		order:          opt.States,
+		Now:            opt.StartTick,
+		rng:            rand.New(rand.NewSource(opt.Seed)),
+		events:         make(chan Event, 64),
+		chatter:        opt.Chatter,
+		log:            logger.With("agent", opt.Name),
+		cooldownUntil:  map[StateName]Tick{},
+		observe:        opt.Observe,
+		attention:      opt.Attention,
+		ticker:         opt.Ticker,
+		moodRates:      rates,
+		sink:           opt.Sink,
+		monologueOn:    opt.Monologue,
+		monologueEvery: opt.MonologueEvery,
+		ctxLimits:      opt.ContextLimits,
+		selfModel:      opt.SelfModel,
+		dredge:         opt.Dredge,
+		Mood:           Mood{Energy: 80, Annoyed: 0, Curious: 60},
+	}
+	if a.ctxLimits == (ContextLimits{}) {
+		a.ctxLimits = DefaultContextLimits()
 	}
 	a.enter(initial, "init")
 	return a, nil
@@ -240,6 +302,56 @@ func (a *Agent) enter(name StateName, reason string) {
 		}
 		a.logTransition(a.lastRecord)
 	}
+	// 独白在 OnEnter **之后**发起：这样上下文里已经包含"我刚进入
+	// 这个状态"这条动作记录，模型才知道自己正在做什么。
+	// 它不阻塞：Think 只起 goroutine，结果以事件回来（R4）。
+	a.maybeThink()
+}
+
+// maybeThink 在启用独白时异步发起一次内心独白。
+//
+// 失败静默：独白是锦上添花，起不来（已有在途调用、未配 Chatter）
+// 不该影响状态机。LLM 调用本身的失败以 EventLLMFailed 回到意识流。
+func (a *Agent) maybeThink() {
+	if !a.monologueOn || a.chatter == nil {
+		return
+	}
+	// 节流：状态平均只停留几 tick，逐次独白会变成每秒一次 LLM 调用
+	// ——既贵又没意义（上下文几乎没变）。0 = 用默认间隔，负数 = 不节流。
+	every := a.monologueEvery
+	if every == 0 {
+		every = defaultMonologueEvery
+	}
+	if every > 0 && a.monologueSent && a.Now-a.lastMonologueAt < every {
+		return
+	}
+	// context.Background()：独白不绑定某次 tick，生命周期由
+	// cancelThinking 管（抢占时取消，见 R4）。
+	err := a.Think(context.Background(), a.Context(SiteMonologue, a.contextOptions()))
+	if err != nil {
+		// 起不来（多半是上一次独白还在途）：**绝不能**改写
+		// inFlightState —— 那会把在途结果错记到刚进入的这个状态名下。
+		return
+	}
+	a.inFlightState = a.Current
+	a.lastMonologueAt = a.Now
+	a.monologueSent = true
+}
+
+// defaultMonologueEvery 是两次独白之间的最小间隔。
+//
+// 30 游戏分钟 = 按 tick 算的半小时。理由：够让上下文真的发生变化
+// （刷了几次手机、干了一会活），又把调用量压到一天几十次这个量级。
+// 想更密/更疏就调它，或给 Options.MonologueEvery 传值。
+const defaultMonologueEvery Tick = 30
+
+// contextOptions 组装 Context 的参数。
+func (a *Agent) contextOptions() ContextOptions {
+	return ContextOptions{
+		Limits:    a.ctxLimits,
+		SelfModel: a.selfModel,
+		Dredge:    a.dredge,
+	}
 }
 
 // logTransition 输出 R6 要求的结构化转移日志。字段不用字符串拼。
@@ -259,8 +371,18 @@ func (a *Agent) logTransition(r DispatchRecord) {
 }
 
 // appendStream 写一条意识流，维持有界（R5）。
+//
+// 默认类型是 KindThought：老的调用点（状态旁白）语义上都是"心里闪过
+// 一句"，用 Thought 最贴近。需要别的类型用 appendStreamKind。
 func (a *Agent) appendStream(text string) {
-	a.Stream = append(a.Stream, StreamEntry{Seq: a.Now, State: a.Current, Text: text})
+	a.appendStreamKind(KindThought, text)
+}
+
+// appendStreamKind 写一条指定类型的意识流，维持有界（R5）。
+func (a *Agent) appendStreamKind(kind Kind, text string) {
+	a.Stream = append(a.Stream, StreamEntry{
+		Seq: a.Now, Kind: kind, State: a.Current, Text: text,
+	})
 	if len(a.Stream) > streamLimit {
 		a.Stream = a.Stream[len(a.Stream)-streamLimit:]
 	}
@@ -324,10 +446,16 @@ func (a *Agent) drainEvents(ctx context.Context) {
 func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 	cur := a.states[a.Current]
 
+	// 外部消息先进记忆层，再决定抢不抢占。
+	// 放在抢占分支之前：@我 既能打断、也必须被记住，两件事互不冲突。
+	if ev.Kind == EventMention || ev.Kind == EventUserMessage {
+		a.ingestMessage(ev)
+	}
+
 	// uninterruptible 状态：延迟而非抢占，但必须留下记录。
 	if cur.Uninterruptible && ev.Kind.priority() >= 100 {
 		a.Deferred = append(a.Deferred, ev)
-		a.appendStream(fmt.Sprintf("收到 %s，但现在不能被打断，先记下", ev.Kind))
+		a.appendStreamKind(KindObservation, fmt.Sprintf("收到 %s，但现在不能被打断，先记下", ev.Kind))
 		return
 	}
 
@@ -339,18 +467,74 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 		a.lastRecord = DispatchRecord{From: a.Current, To: "scrolling_phone", Reason: "preempt", Seq: a.Now}
 		a.enter("scrolling_phone", "preempt")
 	case EventUserMessage:
-		a.appendStream("有人发消息，但没叫我")
+		// 记录已由上面的 ingestMessage 写下（这里不再重复一条）。
 	case EventLLMDone:
 		a.settleThinking()
 		a.CallCount++
-		a.appendStream("想完了")
+		a.absorbMonologue(ev.Data)
 	case EventLLMFailed:
 		a.settleThinking()
-		a.appendStream("没想出来")
+		a.appendStreamKind(KindThought, "话到嘴边没想出来")
 	default:
 		a.log.Warn("unknown_event", slog.String("kind", string(ev.Kind)))
 	}
 	_ = ctx
+}
+
+// ingestMessage 把外部消息交给记忆层。
+//
+// 这是记忆链路的起点：没有这一步，unread 队列、待选区、打捞、
+// Shadow 在真实运行中永远是空的。
+//
+// **刻意不把消息正文写进意识流**：§2.2 规定内容只在进入"看 QQ"
+// 状态时被读取（由 ReadPhone → Scan 走可见性门控）。这里若顺手把
+// 正文记下来，QQ 门控就被旁路掉了——不论在哪个状态，消息内容都会
+// 出现在 prompt 里。因此这里只留一条**不含内容**的提示。
+func (a *Agent) ingestMessage(ev Event) {
+	m := decodeMessage(ev.Data)
+	m.Tick = a.Now
+	// 返回值是记忆层对"该不该打断"的判定；抢占与否由 agent 自己
+	// 决定（R1），这里只需知道消息已入队。
+	if a.sink != nil {
+		a.sink.Accept(m)
+	}
+	if m.MentionsMe || m.RepliesToMe {
+		a.appendStreamKind(KindObservation, "有人叫我")
+		return
+	}
+	a.appendStreamKind(KindObservation, "有新消息，但没叫我")
+}
+
+// absorbMonologue 把一次独白的回复解析成带类型的意识流记录。
+//
+// 解析在此进行而不是在 LLM 侧：类型是**状态机**的概念（它决定
+// 上下文怎么装配），LLM 只负责产出带前缀的文本。
+func (a *Agent) absorbMonologue(data json.RawMessage) {
+	var p struct {
+		Text string `json:"text"`
+	}
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &p)
+	}
+	entries := parseMonologue(p.Text)
+	if len(entries) == 0 {
+		a.appendStreamKind(KindObservation, "想了半天，没想出什么")
+		return
+	}
+	// 结果可能晚于状态切换才回来：回填发起时的状态，否则"在刷手机时
+	// 想的事"会被记成"干活时想的事"，意识流会失真。
+	state := a.inFlightState
+	if state == "" {
+		state = a.Current
+	}
+	for _, e := range entries {
+		a.Stream = append(a.Stream, StreamEntry{
+			Seq: a.Now, Kind: e.Kind, State: state, Text: e.Text,
+		})
+	}
+	if len(a.Stream) > streamLimit {
+		a.Stream = a.Stream[len(a.Stream)-streamLimit:]
+	}
 }
 
 // Run 是 agent 的主循环（R1：一个 agent 一个 goroutine）。

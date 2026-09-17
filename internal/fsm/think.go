@@ -27,10 +27,14 @@ func (a *Agent) Think(ctx context.Context, prompt string) error {
 
 	callCtx, cancel := context.WithCancel(ctx)
 	a.thinking = cancel
-	a.appendStream("开始思考")
 
 	go func() {
 		resp, err := a.chatter.Chat(callCtx, ChatRequest{Prompt: prompt})
+		// 被取消（抢占/关停）时直接丢弃：这不是"失败"，不该往意识流里
+		// 记一条"没想出来"。结果会污染意识流，也会让抢占看起来像故障。
+		if callCtx.Err() != nil {
+			return
+		}
 		// 结果通过事件回到 agent 的 goroutine（R1）。此处绝不直接改状态。
 		var ev Event
 		if err != nil {

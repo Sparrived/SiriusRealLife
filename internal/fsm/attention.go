@@ -50,7 +50,7 @@ func (a *Agent) ReadPhone(n int) {
 		// 不在看 QQ 的状态：不读，但要留下"有未读"这个事实。
 		if a.attention != nil {
 			if unread := a.attention.Unread(); unread > 0 {
-				a.appendStream(fmt.Sprintf("手机上有 %d 条未读，但现在不想看", unread))
+				a.appendStreamKind(KindObservation, fmt.Sprintf("手机上有 %d 条未读，但现在不想看", unread))
 			}
 		}
 		return
@@ -60,11 +60,12 @@ func (a *Agent) ReadPhone(n int) {
 	}
 	msgs := a.attention.Scan(n)
 	if len(msgs) == 0 {
-		a.appendStream("看了一眼手机，没有新消息")
+		a.appendStreamKind(KindObservation, "看了一眼手机，没有新消息")
 		return
 	}
 	for _, m := range msgs {
-		a.appendStream(m)
+		// 这里是唯一能看到消息正文的路径：可见性门控在方法开头。
+		a.appendStreamKind(KindObservation, m)
 	}
 }
 
