@@ -137,15 +137,9 @@ unread 队列 ──进入"看QQ"──► 最近N条直接进 working
 
 向量召回 + 关键词打分融合排序。**这是唯一需要 embedding 的地方。**
 
-⚠️ **AMKR 无 embeddings 端点**（已核对源码，`embeddings` 零匹配）。但泛型 `/v1/{path:path}` 会兜住 `POST /v1/embeddings`，`_upstream_path()` 对未知 mode 原样转发，`resolve_route()` 无端点白名单。
+**依赖状态：** AMKR 的**下一个版本**起把 embeddings 作为一等 route mode 原生支持（`unified_model.embeddings`、上游路径 `v1/embeddings`）。`v4.1.0` 及更早没有，届时无需 Sirius 侧做任何适配——它是普通的 OpenAI 兼容端点。
 
-| 方案 | 前提 | 代价 |
-|---|---|---|
-| A. 走 AMKR 透传 | AMKR 侧把 embedding 模型配成"模型"条目并绑 Key | 零 Sirius 改动，依赖 AMKR 配置 |
-| B. Sirius 本地 embedding | Go 里跑模型 | 引入 cgo/模型文件，违背"标准库优先" |
-| **C. 先不做 RAG（采用）** | 事件记忆也用**关键词 + LLM 重排** | 零依赖，效果打折但可用 |
-
-**采用 C 起步、A 作为升级路径。** 待选区已是关键词打捞，事件记忆用同一机制可先验证"遗忘与打捞"本身能否产生可信行为，再决定是否为向量检索付配置成本。
+⚠️ 因此阻塞项已解除，但**分期决定不变**：Phase 1/2 仍不做 RAG —— 待选区已是关键词打捞，事件记忆用同一机制可先验证"遗忘与打捞"本身能否产生可信行为，再决定是否为向量检索付配置成本。
 
 ### 5.3 升格与整合的触发条件
 

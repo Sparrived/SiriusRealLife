@@ -55,20 +55,25 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 管理页面不自己写，直接反代 AMKR 自带的那套（`/ui/`）。这是**部署期约束**，实现时要守住：
 
-- Go 在 `/amkr/` 挂一个 `httputil.ReverseProxy` 转发到 AMKR，**路径 1:1 透传，不改写任何段**。AMKR 前端从当前 URL 里的 `/ui/` 段反推 API 基址（`apiBase()` 取 `lastIndexOf("/ui/")` 之前的部分），重写掉这段会让所有管理请求打到错误路径
-- `Authorization: Bearer $AMKR_API_KEY` 由 Go **在服务端注入**，密钥下发给浏览器就等于泄露
-- 必须 **403 掉 `/amkr/api/service/*` 和 `/amkr/api/integrations/*`**。这两个是"操作宿主机"的运维接口（启停进程、注册系统服务、改写本机 Claude Code / Codex 配置），在容器里语义不成立，而且会写脏配置
+- Go 在 `/amkr/` 挂一个 `httputil.ReverseProxy` 转发到 AMKR，**路径 1:1 透传，不改写任何段**。AMKR 前端从当前页面 URL 反推 API 基址（`apiBase()` 取 `/ui/` 之前的部分），重写掉这段会让所有管理请求打到错误路径
+- **必须锁定到含 `apiBase()` 的那个 AMKR 版本**（写入 `docker-compose.yml` 的 `image:` 标签，不要用 `latest`）。`v4.1.0`（当前正式版）**没有**这个改动，它随下一个版本发布；接入时填那个 tag。旧版前端用根绝对路径（`fetch("/api/settings")`），挂在 `/amkr/` 下会一律 404 —— 「不改写路径」这条约定与 `v4.1.0` 及更早镜像不兼容。升级 AMKR 时先确认新版本的 `/ui/` 仍从页面路径推导基址，再改标签
+- `Authorization: Bearer $AMKR_API_KEY` 由 Go **在服务端注入**，密钥下发给浏览器就等于泄露。注意 WebUI 自己**总是**会发 `Authorization`（首次访问时 localStorage 为空，实际值是空的 `Bearer `），因此注入必须用 **`Header.Set` 覆盖**，不能用 `Header.Add` 追加 —— Starlette 只会读**第一个** `Authorization` 头，追加时浏览器那个空凭据在前、反代注入的在后，所有管理请求都会 401
+- 必须 **403 掉 `/amkr/api/logs`、`/amkr/api/tool`、`/amkr/api/service/*`、`/amkr/api/integrations/*`**。这些是"操作宿主机"的运维接口（读日志文件、启停进程、注册系统服务、改写本机 Claude Code / Codex 配置），在容器里语义不成立，而且会写脏配置。更稳的做法是启动 AMKR 时加 `--no-ops`（写入配置字段 `ops_enabled`），一次关掉全部四条路径并返回 `404`，不必逐个拉黑；关掉后 `/health` 的 `ops_enabled` 为 `false`，可直接断言
 - `/amkr/` 等同于 AMKR 的完整管理权限。**在 Sirius 自己具备鉴权之前，服务只能绑 `127.0.0.1`**，不得暴露到局域网或公网
 - 不代理 AMKR 的 `/ws/events`：WebUI 不用它（只用 fetch + 轮询），没必要处理升级
 - AMKR 的配置文件、metrics sqlite、上游 key 都在 AMKR 那边管理，**不进本仓库**，Sirius 也不读它们
 
 > WebUI 是随 AMKR wheel 发布的预构建静态 ES module，无构建步骤。`index.html` 用相对路径引资源，因此挂在任意前缀下都能工作 —— 这正是"不改写路径"能成立的原因。
+>
+> 注入正确（`Set` 覆盖）时**不会出现本地授权页**：WebUI 启动时先打 `/health`（免鉴权），看到 `local_auth_enabled` 为真就请求一次 `/api/settings` 探活，而这个请求会被反代覆盖成有效凭据，于是直接进主界面。如果看到验证页要 Key，说明注入没生效或用了 `Add` 追加（见上）。
+
 
 ## 5. 进程模型与部署
 
 - v1 用 docker compose 两个容器：`amkr` + `sirius`，Sirius 通过服务名访问 `http://amkr:8000`
 - 单镜像双进程是**后续可选的分发优化，不是 v1 目标**。先把链路跑通，再谈合并
 - 就绪与存活判断打 AMKR 的 `/health`（该接口免鉴权），不要用 `/` 或猜端口
+- AMKR 容器启动参数带上 `--no-ops`（见第 4 节），并在 compose 里**锁死镜像 tag**，不要用 `latest`：`/amkr/` 反代依赖前端的 `apiBase()` 行为，而该行为在版本之间变过
 - AMKR 镜像的 Dockerfile、tzdata 依赖等由 AMKR 仓库那边负责，**不在本仓库处理**。Sirius 只需假设 AMKR 的 HTTP 契约可用
 
 ## 6. 已知契约要点（实现时的检查清单）
@@ -77,10 +82,11 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 | 项 | 事实 |
 |---|---|
-| 鉴权 | `Authorization: Bearer <local_api_key>`，或 `x-api-key`；`/health`、`HEAD /`、`/docs` 免鉴权 |
+| 鉴权 | `Authorization: Bearer <local_api_key>`，或 `x-api-key`；免鉴权的确切集合是 `/health`、`HEAD /`、`/docs`、`/openapi.json`、`/redoc`。后三个会暴露全部路由、参数与 schema，反代到公网前要一起挡掉。另外只认**第一个** `Authorization` 头（见第 4 节） |
 | 代理路径 | `POST /v1/chat/completions`；另有 `/v1/messages`（Anthropic）、`/v1/responses` |
 | 管理 API | 前缀 `/api/*`，需要本地 key；响应含 `config_revision`，写操作要带版本号否则 `409` |
+| 运维 API | `/api/logs`、`/api/tool`、`/api/service/*`、`/api/integrations/*`，默认**开启**且同样只需本地 key。容器里用 `--no-ops` 关掉（见第 4 节）；只靠反代拉黑时四条都要覆盖 |
 | 服务未就绪 | 无可用 Key 时返回 `503`；上游失败返回 `502` |
 | 任务路由冲突 | 任务名与模型名撞名会在**配置加载时**直接报错，不是运行时 |
 | 参数冲突 | 请求里显式传了任务已固定的采样参数 → `400`（见第 2 节） |
-| 切换 Key | 同一模型配了多个 Key 时由 AMKR 决定用哪个，Sirius 无法（也不需要）指定 |
+| 切换 Key | 同一模型配了多个 Key 时由 AMKR 决定用哪个，Sirius 无法（也不需要）指定。走了备选模型时响应带 `X-AMKR-Fallback: true`，可用于观测降级 |
