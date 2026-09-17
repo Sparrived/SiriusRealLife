@@ -109,17 +109,31 @@ type Agent struct {
 	// 时刻，用 0 当哨兵会让"开局一直没人说话"被误判成"刚刚有消息"。
 	lastMessageAt  Tick
 	everGotMessage bool
-	cooldownUntil  map[StateName]Tick
-	events         chan Event
-	chatter        Chatter
-	log            *slog.Logger
-	lastRecord     DispatchRecord
-	thinking       context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
-	observe        func(Snapshot)
-	attention      Attention
-	ticker         Ticker
-	moodRates      MoodRates
-	sink           MessageSink
+	// untilReported / maxReported 让"条件型"理由只报**一次**。
+	//
+	// 为什么必须有：Until 与 MaxTick 是**条件**，不是**事件**。条件一旦
+	// 成立就会一直成立（"刷够 8 tick 了"不会自己变回去、"已到硬上限"
+	// 更不会），于是 due() 每 tick 都重新报一次，决策点被连续触发——
+	// LLM 说的 for_ticks 完全失效，退化成每 2~3 tick 问一次。
+	//
+	// 实测线上就是如此：85 次决策的相邻间隔中位数是 3，而模型填的
+	// for_ticks 是 12。每次询问都是一次真金白银的 LLM 调用。
+	//
+	// 语义是**上升沿**：条件由假变真时报一次，之后闭麦；条件变回假、
+	// 再变真时才会报第二次。进入新状态时清零。
+	untilReported bool
+	maxReported   bool
+	cooldownUntil map[StateName]Tick
+	events        chan Event
+	chatter       Chatter
+	log           *slog.Logger
+	lastRecord    DispatchRecord
+	thinking      context.CancelFunc // 在途 LLM 调用的取消函数，nil 表示空闲
+	observe       func(Snapshot)
+	attention     Attention
+	ticker        Ticker
+	moodRates     MoodRates
+	sink          MessageSink
 	// inFlightState 记录"哪次独白是为哪个状态发起的"。
 	// 与 thinking 区分：thinking 只管有没有在途调用，这个管结果该
 	// 归给谁。没有它，一次独白的结果可能在换状态之后才回来，
@@ -333,6 +347,10 @@ func (a *Agent) enter(name StateName, reason, why string, forTicks Tick) {
 	a.Current = name
 	a.enteredAt = a.Now
 	a.decideAt = a.Now + forTicks
+	// 新状态的条件型理由重新武装：上一个状态的 Until/Max 成立与否
+	// 与这个状态无关。
+	a.untilReported = false
+	a.maxReported = false
 
 	if s := a.states[name]; s.OnEnter != nil {
 		s.OnEnter(a)

@@ -210,7 +210,151 @@ func TestStayKeepsState(t *testing.T) {
 	}
 }
 
-// alwaysStay 是一个只会调 stay 的假 LLM。
+// TestConditionTriggersFireOnce 验证条件型理由只在**上升沿**报一次。
+//
+// 这条守的是一个线上实测到的真实缺陷：Until 和 MaxTick 是**条件**，
+// 一旦成立就持续成立（"刷够 8 tick 了"不会自己变回去），于是 due()
+// 每 tick 都重新报一次，决策点连轴转——模型填的 for_ticks 完全失效。
+//
+// 实测数据：85 次决策的相邻间隔中位数是 **3**，而模型填的是 for_ticks=12。
+// 每次询问都是一次真金白银的 LLM 调用，且人格被反复打断，难以连贯做事。
+//
+// 直接测 due() 而不是跑端到端：端到端会被 clampTicks 干扰（stay 的
+// for_ticks 被夹到 MaxTick，于是 dwell 合法地每 MaxTick 触发一次），
+// 那是**另一条**正确行为，混在一起就测不清"条件重复上报"这一条。
+func TestConditionTriggersFireOnce(t *testing.T) {
+	count := func(kind TriggerKind, ticks int) int {
+		a := newTestAgent(t, fakeChatter{})
+		// working：Until 看精力（< 30），MaxTick=12。
+		a.Current = "working"
+		a.enteredAt = a.Now
+		a.Mood.Energy = 10 // Until 恒真
+
+		n := 0
+		for i := 0; i < ticks; i++ {
+			a.Now++
+			for _, tr := range a.due() {
+				if tr.Kind == kind {
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	// 跑 50 tick（远超 MaxTick=12），每个条件都只该报一次。
+	if got := count(TriggerUntil, 50); got != 1 {
+		t.Errorf("Until 在条件持续成立时报了 %d 次，期望 1 次（上升沿）", got)
+	}
+	if got := count(TriggerMax, 50); got != 1 {
+		t.Errorf("MaxTick 在条件持续成立时报了 %d 次，期望 1 次（上升沿）", got)
+	}
+}
+
+// TestDecisionCadenceRespectsForTicks 验证决策间隔真的尊重 for_ticks。
+//
+// 这是上一条的端到端版本，也是**本来该在 CI 里拦住那个线上缺陷**的测试：
+// 只测 due() 的上升沿还不够——只要有人把 due() 的返回直接当"要不要问"
+// 用、或把 pending 清早了，线上仍会退化成每 3 tick 问一次。
+//
+// 做法：让假 LLM 每次都填一个明确的 for_ticks，然后数一段时间里到底
+// 被问了几次。
+//
+// ⚠️ 期望值要按**夹紧后**的 for_ticks 算，不是按 want 本身：框架会把
+// for_ticks 夹进 [MinTick, MaxTick]，所以模型说"20 tick 后再问"，若该
+// 状态的 MaxTick 只有 12，实际就是 12。第一版测试没考虑这点，算出
+// "200 tick 问了 34 次、超过上界 20"而误报失败——那是**正确行为**
+// 被测试写错了。
+func TestDecisionCadenceRespectsForTicks(t *testing.T) {
+	const want = Tick(20)
+	const span = Tick(400)
+
+	// 用 working（MinTick=4、MaxTick=12）：它的 Until 看精力，而默认
+	// 精力充足时恒假，因此询问频率**只**由夹紧后的 for_ticks 决定，
+	// 不会被条件型入口干扰。
+	var eff = want
+	for _, s := range MVPStates() {
+		if s.Name == "working" && eff > s.MaxTick {
+			eff = s.MaxTick
+		}
+	}
+	if eff == want {
+		t.Fatalf("预期 working 的 MaxTick 会夹紧 for_ticks=%d，但它没有（eff=%d）", want, eff)
+	}
+
+	ch := &cadenceChatter{want: want}
+	a := newTestAgentWith(t, Options{
+		Name: "cadence", States: MVPStates(), Initial: "working",
+		Chatter: ch,
+	})
+	ctx := context.Background()
+
+	start := a.Now
+	for a.Now < start+span {
+		stepSync(t, a, ctx)
+	}
+
+	ideal := int(span / eff)
+	got := ch.decisions
+	// 给 2 倍余量（首次进入、夹紧边界取整都会少问几次）。缺陷版本是
+	// **每 tick** 问一次（~span 次，约 33 倍），2 倍余量足以区分。
+	if got > ideal*2 {
+		t.Errorf("%d tick 内问了 %d 次决策，理想值 %d（for_ticks 夹紧后为 %d），"+
+			"超过 2 倍上界 —— 条件型理由被重复上报了（线上实测过这个缺陷）",
+			span, got, ideal, eff)
+	}
+	if got < ideal/2 {
+		t.Errorf("%d tick 内只问了 %d 次决策，少于理想值 %d 的一半 —— 检查点可能没被正确推进",
+			span, got, ideal)
+	}
+}
+
+// cadenceChatter 每次都调 stay 并填固定 for_ticks，用于观察决策频率。
+type cadenceChatter struct {
+	want      Tick
+	decisions int
+}
+
+func (c *cadenceChatter) Chat(_ context.Context, req ChatRequest) (ChatResponse, error) {
+	if len(req.Tools) == 0 {
+		return ChatResponse{Text: `{"thought":"嗯","action":"","intent":""}`}, nil
+	}
+	c.decisions++
+	args, _ := json.Marshal(map[string]any{"why": "再待一会", "for_ticks": c.want})
+	return ChatResponse{
+		Text:      "再待一会",
+		ToolCalls: []ToolCall{{ID: "c1", Name: toolStay, Arguments: args}},
+	}, nil
+}
+
+// 只报一次的前提是"条件真的持续成立"。若她中途做了别的事让条件不再
+// 成立（这里是把精力补回去），之后再成立时必须还能提醒她——否则
+// 一次提醒之后就永久静音，Until 就废了。
+func TestUntilRearmsAfterConditionClears(t *testing.T) {
+	a := newTestAgent(t, fakeChatter{})
+	a.Current = "working"
+	// 越过 MinTick（working 是 4）：否则 due() 一律返回空，测不到东西。
+	a.enteredAt = a.Now - 5
+	a.decideAt = a.Now + 1000 // 检查点放远，只让 Until 参与
+
+	a.Mood.Energy = 10
+	a.Now++
+	if len(a.due()) == 0 {
+		t.Fatal("条件首次成立时应产出理由")
+	}
+
+	// 条件不再成立：due() 应重新武装。
+	a.Mood.Energy = 80
+	a.Now++
+	a.due()
+	// 再次成立：应再报一次。
+	a.Mood.Energy = 10
+	a.Now++
+	if len(a.due()) == 0 {
+		t.Error("条件重新成立后应再次提醒（否则 Until 一次提醒后永久静音）")
+	}
+}
+
 type alwaysStay struct{}
 
 func (alwaysStay) Chat(_ context.Context, req ChatRequest) (ChatResponse, error) {

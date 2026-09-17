@@ -61,6 +61,12 @@ const defaultStayTick Tick = 3
 // 三种入口在这里汇合。MinTick 是硬下限：期间一律不问，避免一次
 // 3 秒的 LLM 调用只换来 1 tick 的停留。MaxTick 是硬上限：到点必须问，
 // 否则一次失败的降级就可能让人格永远赖在一个状态里。
+//
+// **条件型入口只在上升沿报一次**（untilReported / maxReported）。
+// 这是必须的：Until 与 MaxTick 一旦成立就持续成立，逐 tick 重报会让
+// 决策点连轴转，模型填的 for_ticks 形同虚设。实测线上每 3 tick 问一次，
+// 而模型填的是 12。检查点（decideAt）本身就是"过一次就消失"的，
+// 靠 commitStay/commitEnter 推进它，因此不需要额外标记。
 func (a *Agent) due() []Trigger {
 	s := a.states[a.Current]
 	if a.Now < a.enteredAt+s.MinTick {
@@ -74,7 +80,10 @@ func (a *Agent) due() []Trigger {
 			At:   a.Now,
 		})
 	}
-	if s.Until != nil && s.Until(a) {
+
+	// Until：只在"由不成立变为成立"时报一次。
+	if until := s.Until != nil && s.Until(a); until && !a.untilReported {
+		a.untilReported = true
 		// 理由要说**具体**，不能只说"该结束了"：模型得知道是什么迹象，
 		// 才能判断该不该当真。而 Until 只是一个 bool，说不出原因，因此
 		// 这里补上框架**确实知道**的事实——待了多久、安静了多久。
@@ -86,8 +95,14 @@ func (a *Agent) due() []Trigger {
 			text += fmt.Sprintf("而且最近 %d tick 都没有新消息。", quiet)
 		}
 		out = append(out, Trigger{Kind: TriggerUntil, Text: text, At: a.Now})
+	} else if !until {
+		// 条件不再成立：重新武装，下次由假变真时还能报。
+		a.untilReported = false
 	}
-	if a.Now >= a.enteredAt+s.MaxTick {
+
+	// MaxTick：同样是条件，同样只在上升沿报一次。
+	if maxed := a.Now >= a.enteredAt+s.MaxTick; maxed && !a.maxReported {
+		a.maxReported = true
 		out = append(out, Trigger{
 			Kind: TriggerMax,
 			Text: fmt.Sprintf("已经在「%s」待了 %d tick，到上限了，必须做个决定。",
@@ -103,14 +118,18 @@ func (a *Agent) due() []Trigger {
 // 调用期间人格**继续待在原状态**、继续泵入订阅的消息——这正是
 // "状态是一段订阅、不是一次跳跃"的落点。
 func (a *Agent) consider(ctx context.Context) {
-	triggers := a.due()
-	if len(triggers) == 0 {
+	// 先把本 tick 新成立的上升沿收进 pending。
+	a.pending = append(a.pending, a.due()...)
+	// **由 pending 决定要不要问**，而不是由"本 tick 有没有新理由"。
+	// 这一点很关键：due() 现在只在上升沿产出理由，若上一次要问时
+	// 正好有别的调用在途，理由会被攒下来而 due() 不再产出——按
+	// "本 tick 有没有新理由"判断就会把它永远搁置，模型再也收不到
+	// 那条"该走了"。
+	if len(a.pending) == 0 {
 		return
 	}
-	// 攒着而不是覆盖：多个入口同 tick 成立时，模型应当一次看到全部理由。
-	a.pending = append(a.pending, triggers...)
 	if a.thinking != nil {
-		// 已有在途调用：理由留着，等它落定后下个 tick 再问。
+		// 已有在途调用（多半是独白）：理由留着，等它落定后下个 tick 再问。
 		return
 	}
 	req := ChatRequest{
@@ -118,8 +137,7 @@ func (a *Agent) consider(ctx context.Context) {
 		Tools:  decisionTools(a.Current, a.survey()),
 	}
 	if err := a.think(ctx, req, thinkDecision); err != nil {
-		// 起不来（没配 Chatter、或已有在途调用）。降级为"原样再待一会"，
-		// 理由保留到下次。
+		// 起不来（没配 Chatter）。降级为"原样再待一会"。
 		a.log.Warn("decision_not_started", "err", err.Error())
 		a.commitStay(defaultStayTick, "没想出来，先按原样待着")
 	}
