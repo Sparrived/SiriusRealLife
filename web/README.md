@@ -35,7 +35,7 @@ src/
   components/
     StateGraph.vue               状态机 + 上次分派（含候选权重与 roll）
     MoodMeters.vue               三个连续心境量
-    ConsciousnessStream.vue      意识流（按状态分组）
+    ConsciousnessStream.vue      意识流（按状态分组，带类型标记）
 check-contrast.mjs               WCAG AA 断言，读真实 CSS 变量
 ```
 
@@ -45,6 +45,9 @@ check-contrast.mjs               WCAG AA 断言，读真实 CSS 变量
 - **字段 snake_case**：与 `internal/transport/server.go` 的 `stateResponse` 一一对应。
   改后端响应形状必须同步改 `src/api.ts`。
 - **不做乐观更新**：投递消息后不改本地状态，等后端推回来。
+- **意识流的类型标记不只用颜色**：`·` 看到 / `~` 想 / `›` 做 / `→` 打算。
+  符号本身就能区分，颜色只是辅助，色盲用户同样可读。
+  兜底 `kindMeta()` 保证后端将来加类型时界面不崩。
 - **颜色改动要通过 `npm run check:contrast`**：它读 `base.css` 的真实变量值，
   断言每级文字在不低于 4.5:1 的对比度上（本项目文字多为 10–13px，按小字算）。
 - 动效一律包在 `prefers-reduced-motion` 里；本页只有一处循环动效

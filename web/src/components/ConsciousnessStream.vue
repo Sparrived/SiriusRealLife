@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { stateMeta, type StreamEntry } from '../api'
+import { kindMeta, stateMeta, type StreamEntry } from '../api'
 
 const props = defineProps<{ entries: StreamEntry[]; follow: boolean }>()
 
@@ -61,7 +61,12 @@ const groups = computed(() => {
           <span class="gstate">{{ g.label }}</span>
           <span class="num gtick">t{{ g.items[0]?.seq }}</span>
         </div>
-        <p v-for="e in g.items" :key="e.seq + e.text" class="line">{{ e.text }}</p>
+        <p v-for="(e, ei) in g.items" :key="e.seq + '-' + ei" class="line">
+          <span class="mark" :class="'k-' + e.kind" :title="kindMeta(e.kind).label">{{
+            kindMeta(e.kind).mark
+          }}</span>
+          <span :class="{ intent: e.kind === 'intent' }">{{ e.text }}</span>
+        </p>
       </div>
     </div>
 
@@ -117,6 +122,32 @@ const groups = computed(() => {
   padding-left: 9px;
   text-indent: -9px;
   word-break: break-word;
+}
+
+/*
+ * 类型标记：固定宽度保证各行文本左对齐。
+ * 颜色只是辅助——符号本身已经区分了类型（色盲可用）。
+ */
+.mark {
+  display: inline-block;
+  width: 9px;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.mark.k-thought {
+  color: var(--text-dim);
+}
+
+.mark.k-intent {
+  color: var(--accent);
+}
+
+/* 打算做的事加下划线：跨状态存活的那条最值得一眼看到。 */
+.intent {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
 }
 
 .empty {

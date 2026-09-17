@@ -7,10 +7,32 @@ export interface Mood {
   curious: number
 }
 
+// StreamKind 是意识流记录的类型（对应 Go 侧 fsm.Kind）。
+//
+// 后端加了 Kind 之后前端必须跟上：否则"在想什么/做了什么/打算做什么"
+// 在界面上是一团同样的文本，分类的价值就丢了。
+export type StreamKind = 'observation' | 'thought' | 'action' | 'intent'
+
 export interface StreamEntry {
   seq: number
+  kind: StreamKind
   state: string
   text: string
+}
+
+// KIND_META 给每种记录类型一个标记与说明。
+//
+// 只用符号不只用颜色：色盲用户也要能分辨类型。
+export const KIND_META: Record<StreamKind, { mark: string; label: string }> = {
+  observation: { mark: '·', label: '看到' },
+  thought: { mark: '~', label: '想' },
+  action: { mark: '›', label: '做' },
+  intent: { mark: '→', label: '打算' },
+}
+
+// kindMeta 兜底：后端将来加类型时界面不崩。
+export function kindMeta(kind: string): { mark: string; label: string } {
+  return KIND_META[kind as StreamKind] ?? { mark: '·', label: kind }
 }
 
 export interface Candidate {
