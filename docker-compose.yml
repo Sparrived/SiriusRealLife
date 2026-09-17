@@ -101,7 +101,8 @@ services:
       # 与下面的 ports 写法是一对，缺了它服务会拒绝启动。
       SIRIUS_ALLOW_NON_LOOPBACK: "1"
       SIRIUS_TICK_INTERVAL: ${SIRIUS_TICK_INTERVAL:-1s}
-      SIRIUS_SEED: ${SIRIUS_SEED:-20240101}
+      # 没有 SIRIUS_SEED：框架里已经没有随机数了（AGENTS.md R3）。
+      # 可复现性来自决策日志（模型给的理由 + 当时的候选清单），不来自种子。
       SIRIUS_START_TICK: ${SIRIUS_START_TICK:-420}
       SIRIUS_LOG_LEVEL: ${SIRIUS_LOG_LEVEL:-info}
       # 内心独白的最小间隔（tick）。这是唯一的 LLM 成本闸门：
