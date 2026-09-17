@@ -10,6 +10,11 @@ bin/
 .env
 .env.local
 
+# runtime data（向量库落盘，见 docs/memory.md §5.2）
+data/
+*.db
+*.sqlite
+
 # editor / os
 .DS_Store
 .idea/
