@@ -22,10 +22,79 @@ import (
 )
 
 // fakeChatter 是确定性 Chatter（不需要真实 LLM）。
+//
+// 它只回文本、**不调工具**，因此每次决策都会走"降级成原样再待一会"
+// 那条路。这对"不阻塞 tick""门控"这类测试正合适；而要验证状态真的
+// 会转移，得用 decidingChatter。
 type fakeChatter struct{ reply string }
 
 func (f fakeChatter) Chat(ctx context.Context, _ fsm.ChatRequest) (fsm.ChatResponse, error) {
 	return fsm.ChatResponse{Text: f.reply}, nil
+}
+
+// decidingChatter 会真的调用 enter_state，让状态机动起来。
+//
+// 为什么验收层需要它：状态现在完全由 LLM 决定，一个不会调工具的
+// 假 LLM 会让 agent 永远停在初始状态——"30 tick 内必须发生转移"
+// 这类验收就测不到东西。它按候选清单确定性地点菜，保持可复现。
+type decidingChatter struct {
+	seed int64
+}
+
+func (d *decidingChatter) Chat(_ context.Context, req fsm.ChatRequest) (fsm.ChatResponse, error) {
+	// 独白调用（不带工具）只回内心活动。
+	if len(req.Tools) == 0 {
+		return fsm.ChatResponse{Text: "想: 有点无聊\n打算: 去写点东西"}, nil
+	}
+	names := menuFromTools(req.Tools)
+	if len(names) == 0 {
+		return fsm.ChatResponse{
+			Text: "还是先这样吧",
+			ToolCalls: []fsm.ToolCall{{
+				ID: "c1", Name: "stay",
+				Arguments: json.RawMessage(`{"why":"没得选","for_ticks":5}`),
+			}},
+		}, nil
+	}
+	pick := names[int(d.seed)%len(names)]
+	d.seed++
+	args, _ := json.Marshal(map[string]any{
+		"state": pick, "for_ticks": 5, "why": "想换个事做",
+	})
+	return fsm.ChatResponse{
+		Text: "换个事做吧",
+		ToolCalls: []fsm.ToolCall{
+			{ID: "c1", Name: "enter_state", Arguments: args},
+		},
+	}, nil
+}
+
+// menuFromTools 从工具声明里取出 enter_state 的 state enum。
+//
+// 走 schema 而不是硬编码状态名：这样验收测的是"模型看到什么菜单"，
+// 而不是把状态表抄一遍（抄的那份迟早与真实菜单漂移）。
+func menuFromTools(specs []fsm.ToolSpec) []fsm.StateName {
+	for _, s := range specs {
+		if s.Name != "enter_state" {
+			continue
+		}
+		var p struct {
+			Properties struct {
+				State struct {
+					Enum []string `json:"enum"`
+				} `json:"state"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(s.Parameters, &p); err != nil {
+			return nil
+		}
+		out := make([]fsm.StateName, 0, len(p.Properties.State.Enum))
+		for _, n := range p.Properties.State.Enum {
+			out = append(out, fsm.StateName(n))
+		}
+		return out
+	}
+	return nil
 }
 
 // blockingChatter 一直阻塞到 release 关闭或被取消，用来模拟慢 LLM。
@@ -70,8 +139,12 @@ func (c *logCapture) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// transitions 解析出全部 state_transition 日志。
-func (c *logCapture) transitions() []map[string]any {
+// decisions 解析出全部 state_decision 日志。
+//
+// 日志名从 state_transition 改成了 state_decision：内容也变了——
+// 不再有权重快照与随机数，取而代之的是模型给的理由（why）与它
+// 看到的完整候选清单（含被挡掉的及原因）。
+func (c *logCapture) decisions() []map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []map[string]any
@@ -81,7 +154,7 @@ func (c *logCapture) transitions() []map[string]any {
 			if err := json.Unmarshal([]byte(part), &m); err != nil {
 				continue
 			}
-			if m["msg"] == "state_transition" {
+			if m["msg"] == "state_decision" {
 				out = append(out, m)
 			}
 		}
@@ -113,7 +186,6 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 	agent, err := fsm.New(fsm.Options{
 		Name:      "sirius",
 		States:    fsm.MVPStates(),
-		Seed:      20240101,
 		StartTick: 7 * 60, // 07:00
 		Initial:   initial,
 		Chatter:   chatter,
@@ -151,88 +223,128 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 }
 
 // TestAcceptance30Ticks 跑 30 tick，核对验收 1/2/4：
-// 不自锁、不死循环、同状态不连续进入、每次转移都有完整结构化日志。
+// 不自锁、不死循环、同状态不连续进入、每次决定都有完整结构化日志。
 func TestAcceptance30Ticks(t *testing.T) {
-	h := newHarness(t, "idle", fakeChatter{reply: "嗯"})
+	h := newHarness(t, "idle", &decidingChatter{seed: 3})
 	ctx := context.Background()
 
+	// 推进 30 tick。循环条件用 Now 而不是固定次数：settle 为了让
+	// 异步结果落定会额外推几个 tick（它只能靠 Step 来 drain 事件，
+	// 而 acceptance 是外部包，够不到内部的 drainEvents）。
+	// "一次 Step 恰好前进一个 tick"由 fsm 包内的测试守着，
+	// 这里只确认时钟确实在走、且走到了。
+	const ticks = 30
+	start := h.agent.Now
 	prevState := h.agent.Current
 	transitions := 0
-	for i := 0; i < 30; i++ {
+	for h.agent.Now < start+ticks {
 		h.agent.Step(ctx)
+		settle(t, h, ctx)
 		if h.agent.Current != prevState {
 			transitions++
 			prevState = h.agent.Current
 		}
 	}
 
-	if want := fsm.Tick(30 + 7*60); h.agent.Now != want {
-		t.Fatalf("30 tick 后 Now = %d, 期望 %d", h.agent.Now, want)
+	if got := h.agent.Now - start; got < ticks {
+		t.Fatalf("只推进了 %d tick，期望至少 %d", got, ticks)
 	}
 	if transitions == 0 {
 		t.Fatal("30 tick 内一次状态转移都没有（可能自锁）")
 	}
 
-	// 验收 2：转移日志字段齐全（R6）。
-	recs := h.logs.transitions()
+	// 验收 2：决策日志字段齐全（R6）。
+	recs := h.logs.decisions()
 	if len(recs) == 0 {
-		t.Fatal("没有 R6 转移日志")
+		t.Fatal("没有 R6 决策日志")
 	}
 	for i, r := range recs {
-		for _, key := range []string{"from", "to", "reason", "roll", "total", "candidates", "seq"} {
+		for _, key := range []string{"from", "to", "reason", "why", "for_ticks", "candidates", "seq"} {
 			if _, ok := r[key]; !ok {
-				t.Errorf("第 %d 条转移日志缺少 %s: %v", i, key, r)
+				t.Errorf("第 %d 条决策日志缺少 %s: %v", i, key, r)
 			}
 		}
-		if r["from"] == r["to"] {
+		if r["reason"] == "llm" && r["from"] == r["to"] {
 			t.Errorf("第 %d 条日志 from==to==%v", i, r["to"])
 		}
 	}
 
-	// 验收 4：同一状态不连续进入两次（R3）——"from==to" 已在日志层排除。
-	// 这里再核对意识流有界（R5）。
+	// 验收 4：同一状态不连续进入两次（R3）——候选清单里排除了当前
+	// 状态，因此这条由框架保证，不靠模型自觉。
 	if len(h.agent.Stream) > 100 {
 		t.Errorf("意识流应有界，实际 %d 条", len(h.agent.Stream))
 	}
 }
 
-// TestAcceptanceDeterministic 验证 R3：同种子同输入必须可复现。
-func TestAcceptanceDeterministic(t *testing.T) {
-	run := func() []string {
-		h := newHarness(t, "idle", fakeChatter{reply: "嗯"})
+// settle 推进到没有在途 LLM 调用为止，让异步结果落定。
+//
+// 决策与独白都异步（R4），测试直接调 Step 时必须自己把结果事件
+// drain 掉，否则状态永远停在原处、断言看到的是零值。
+func settle(t *testing.T, h *harness, ctx context.Context) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for h.agent.IsThinking() {
+		if time.Now().After(deadline) {
+			t.Fatal("LLM 调用未在 3s 内落定")
+		}
+		h.agent.Step(ctx)
+		time.Sleep(time.Millisecond)
+	}
+	h.agent.Step(ctx)
+}
+
+// TestAcceptanceReproducibleFromDecisions 验证可复现性的新来源。
+//
+// 旧版是"同种子同输入"（R3 的 *rand.Rand）。现在**没有随机**，复现性
+// 来自"决定由 LLM 给出、理由落进日志"：同一个假 LLM 必须产生同一串
+// 状态，并且每一步都能在日志里查到当时的选择与理由。
+func TestAcceptanceReproducibleFromDecisions(t *testing.T) {
+	run := func() ([]string, int) {
+		h := newHarness(t, "idle", &decidingChatter{seed: 11})
 		ctx := context.Background()
 		var path []string
-		for i := 0; i < 200; i++ {
+		for i := 0; i < 120; i++ {
 			h.agent.Step(ctx)
+			settle(t, h, ctx)
 			path = append(path, string(h.agent.Current))
 		}
-		return path
+		return path, len(h.logs.decisions())
 	}
-	a, b := run(), run()
+	a, alog := run()
+	b, blog := run()
 	if len(a) != len(b) {
 		t.Fatalf("两次运行长度不同: %d vs %d", len(a), len(b))
 	}
 	for i := range a {
 		if a[i] != b[i] {
-			t.Fatalf("第 %d 步状态不同: %s vs %s（R3 要求可复现）", i, a[i], b[i])
+			t.Fatalf("第 %d 步状态不同: %s vs %s（决定必须可复现）", i, a[i], b[i])
 		}
+	}
+	// 可复现性必须**有据可查**：日志条数也要一致，且不能为空。
+	if alog == 0 {
+		t.Fatal("没有任何决策日志：状态在动却查不到理由")
+	}
+	if alog != blog {
+		t.Errorf("两次运行的决策条数不同: %d vs %d", alog, blog)
 	}
 }
 
 // TestAcceptanceLLMDoesNotBlockTick 验收 3：LLM 调用期间状态机不被阻塞，
-// 且仍能收事件、仍能被抢占（R4）。
+// 且仍能收事件（R4）。
 //
-// 走真实路径：独白由 enter() 自动发起（不再手工调 Think），
-// 这样测的就是生产代码实际会走的那条路。
+// 走真实路径：调用由 Step 自动发起（不手工调 think），这样测的就是
+// 生产代码实际会走的那条路。
 func TestAcceptanceLLMDoesNotBlockTick(t *testing.T) {
 	release := make(chan struct{})
 	cancelled := make(chan struct{}, 4)
 	h := newHarness(t, "working", blockingChatter{release: release, cancelled: cancelled})
 	ctx := context.Background()
 
-	// 构造时进入初始状态即已发起独白。
+	// 推一个 tick 让 agent 发起调用。working 的 MinTick 是 4，因此
+	// 第一个 tick 不会问决策，发起的是独白——两者走同一条在途通道。
+	h.agent.Step(ctx)
 	if !h.agent.IsThinking() {
-		t.Fatal("进入状态应自动发起独白")
+		t.Fatal("推一个 tick 后应有一次在途 LLM 调用")
 	}
 
 	// 调用在途时连推 5 个 tick：必须立即返回。
@@ -429,6 +541,10 @@ func TestAcceptanceHTTPIntegration(t *testing.T) {
 	}
 
 	// 投递事件后应能被 agent 处理。
+	//
+	// 断言刻意只到"事件被接受、且不改变状态"为止：@ 不再是抢占信号
+	// （§2.1），"有人叫我"只是让这条未读更显眼。它会进记忆层、推高
+	// 烦躁，但**不掐断手上的事**——换不换状态由 LLM 下一次决策说了算。
 	body := strings.NewReader(`{"text":"@我 在吗","mentions_me":true}`)
 	resp2, err := http.Post(h.server.URL+"/api/v1/agents/sirius/events", "application/json", body)
 	if err != nil {
@@ -438,9 +554,11 @@ func TestAcceptanceHTTPIntegration(t *testing.T) {
 	if resp2.StatusCode != http.StatusAccepted {
 		t.Fatalf("投递事件状态码 = %d", resp2.StatusCode)
 	}
+	before := h.agent.Current
 	h.agent.Step(ctx)
-	if h.agent.Current != "scrolling_phone" {
-		t.Errorf("HTTP 投递的 @ 事件应触发抢占，实际 %s", h.agent.Current)
+	if h.agent.Current != before {
+		t.Errorf("HTTP 投递的 @ 事件不该改变状态，期望仍是 %s，实际 %s",
+			before, h.agent.Current)
 	}
 }
 
@@ -537,7 +655,12 @@ func TestAcceptanceHTTPMessageReachesMemory(t *testing.T) {
 		t.Error("普通消息不应把 agent 拉到看 QQ 状态")
 	}
 
-	// 再发一条 @我的：必须即时打断。
+	// 再发一条 @我的：同样**不**打断状态（§2.1），但要进记忆层。
+	//
+	// 旧断言是"@ 必须即时把 agent 拉到 scrolling_phone"。抢占取消后，
+	// @ 与普通消息的差别只剩"这条未读更显眼"（进烦躁的积累、在 prompt
+	// 里被标出来）；状态换不换由 LLM 下一次决策说了算。真正要守住的
+	// 是"消息确实进了记忆层"，那才是这条测试的存在理由。
 	body = `{"kind":"mention","from":"张三","text":"在吗","mentions_me":true}`
 	resp2, err := http.Post(h.server.URL+"/api/v1/agents/sirius/events",
 		"application/json", strings.NewReader(body))
@@ -547,14 +670,21 @@ func TestAcceptanceHTTPMessageReachesMemory(t *testing.T) {
 	defer resp2.Body.Close()
 
 	deadline = time.Now().Add(2 * time.Second)
-	for h.agent.Current != "scrolling_phone" && time.Now().Before(deadline) {
+	for h.store.UnreadCount() < 2 && time.Now().Before(deadline) {
 		h.agent.Step(ctx)
 		time.Sleep(time.Millisecond)
 	}
-	if got := h.agent.Current; got != "scrolling_phone" {
-		t.Fatalf("被 @ 后状态 = %s, 期望 scrolling_phone", got)
+	if got := h.store.UnreadCount(); got < 2 {
+		t.Fatalf("被 @ 后未读 = %d, 期望 ≥2（@ 也没进记忆层）", got)
 	}
-	// 进入看 QQ 会读消息，正文这才合法出现——同时反证它确实存进了记忆层。
+	if got := h.agent.Current; got == "scrolling_phone" {
+		t.Error("@ 不该把 agent 拉到看 QQ 状态（抢占已取消）")
+	}
+
+	// 正文只在订阅 QQ 的状态里才可见：手动切过去，由 ReadPhone 走
+	// 可见性门控读出——这同时反证消息确实存进了记忆层。
+	h.agent.Current = "scrolling_phone"
+	h.agent.ReadPhone(5)
 	if got := streamText(h.agent); !strings.Contains(got, "在吗") {
 		t.Errorf("进入看 QQ 后应读到消息正文:\n%s", got)
 	}

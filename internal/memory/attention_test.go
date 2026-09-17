@@ -20,7 +20,6 @@ func newAgentWithStore(t *testing.T, initial fsm.StateName) (*fsm.Agent, *Store)
 	a, err := fsm.New(fsm.Options{
 		Name:      "t",
 		States:    fsm.MVPStates(),
-		Seed:      1,
 		Initial:   initial,
 		Attention: store, // Store 隐式满足 fsm.Attention
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -137,7 +136,7 @@ func TestReadPhoneWithNoMessages(t *testing.T) {
 // TestAgentRunsWithoutAttention 验证未接 Attention 时不 panic（离线场景）。
 func TestAgentRunsWithoutAttention(t *testing.T) {
 	a, err := fsm.New(fsm.Options{
-		Name: "no-attention", States: fsm.MVPStates(), Seed: 1, Initial: "working",
+		Name: "no-attention", States: fsm.MVPStates(), Initial: "working",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
