@@ -316,7 +316,7 @@ func New(opt Options) (*Agent, error) {
 // Events 返回事件投递通道。这是外部影响 agent 的唯一入口（R1）。
 func (a *Agent) Events() chan<- Event { return a.events }
 
-// LastRecord 返回最近一次分派记录（R6 日志的内容）。
+// LastRecord 返回最近一次决策记录（R6 日志的内容）。
 func (a *Agent) LastRecord() DispatchRecord { return a.lastRecord }
 
 // PlannedDuration 返回当前状态本次计划的停留时长。

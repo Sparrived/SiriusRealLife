@@ -22,7 +22,7 @@ import (
 type CallSite = fsm.CallSite
 
 const (
-	// SiteDispatch 状态分派：决定下一步做什么。
+	// SiteDispatch 状态决策：决定下一步做什么。
 	SiteDispatch = fsm.SiteDispatch
 	// SiteMonologue 内心独白：写意识流。
 	SiteMonologue = fsm.SiteMonologue
