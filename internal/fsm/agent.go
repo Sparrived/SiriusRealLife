@@ -455,7 +455,10 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 	// uninterruptible 状态：延迟而非抢占，但必须留下记录。
 	if cur.Uninterruptible && ev.Kind.priority() >= 100 {
 		a.Deferred = append(a.Deferred, ev)
-		a.appendStreamKind(KindObservation, fmt.Sprintf("收到 %s，但现在不能被打断，先记下", ev.Kind))
+		// 只写"这条被打断的请求被推迟了"。那句"有人叫我"已由
+		// ingestMessage 写下，这里再写一遍会让意识流出现两条同义记录。
+		// 也不写 ev.Kind：意识流是给 LLM 读的，内部标识不该出现在那里。
+		a.appendStreamKind(KindObservation, "被打断了，但现在不能停，先记下来")
 		return
 	}
 
@@ -474,7 +477,16 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 		a.absorbMonologue(ev.Data)
 	case EventLLMFailed:
 		a.settleThinking()
+		// 失败原因必须进结构化日志，**不能**只留在意识流里。
+		// 意识流是 LLM 读的，那里只能写"话到嘴边没想出来"这种人话；
+		// 而排障需要的是上游原文。曾经因为把错误吞掉，容器里所有独白
+		// 静默失败、只看到一堆"没想出来"，只能去翻 AMKR 的日志文件
+		// 才知道是 unified-model 解析不到（R10：不重试，但要能看见）。
 		a.appendStreamKind(KindThought, "话到嘴边没想出来")
+		a.log.Warn("llm_failed",
+			slog.String("state", string(a.Current)),
+			slog.String("err", llmError(ev.Data)),
+		)
 	default:
 		a.log.Warn("unknown_event", slog.String("kind", string(ev.Kind)))
 	}
@@ -503,6 +515,23 @@ func (a *Agent) ingestMessage(ev Event) {
 		return
 	}
 	a.appendStreamKind(KindObservation, "有新消息，但没叫我")
+}
+
+// llmError 从 EventLLMFailed 的负载里取出错误原文。
+//
+// 负载可能为空或非法（测试里直接投 Event{Kind: EventLLMFailed}），
+// 此时给一个占位串而不是空字符串，免得日志里出现空的 err 字段。
+func llmError(data json.RawMessage) string {
+	var p struct {
+		Error string `json:"error"`
+	}
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &p)
+	}
+	if p.Error == "" {
+		return "(无错误详情)"
+	}
+	return p.Error
 }
 
 // absorbMonologue 把一次独白的回复解析成带类型的意识流记录。

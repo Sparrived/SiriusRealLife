@@ -2,6 +2,7 @@ package fsm
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -348,4 +349,73 @@ func TestMessageMarksMention(t *testing.T) {
 	if !found {
 		t.Errorf("被 @ 后意识流应留下提示, 实际: %+v", a.Stream)
 	}
+}
+
+// TestLLMFailureLoggedWithCause 验证 LLM 失败的原因进日志。
+//
+// 曾经这里只往意识流写一句"没想出来"，错误原文被丢掉。结果是容器里
+// 所有独白静默失败，只看到满屏"话到嘴边没想出来"，得去翻上游 AMKR 的
+// 日志文件才查得出是 unified-model 解析不到。意识流给 LLM 读人话，
+// 日志给排障读原文，两者都要有（R10 说不重试，但没说可以看不见）。
+func TestLLMFailureLoggedWithCause(t *testing.T) {
+	var buf strings.Builder
+	a := newTestAgentWith(t, Options{
+		Name: "test", States: MVPStates(), Seed: 7, Initial: "idle",
+		Chatter: fakeChatter{},
+		Logger:  slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+
+	a.absorbMonologue(nil) // 空负载：不该 panic
+	a.handleEvent(context.Background(), Event{
+		Kind: EventLLMFailed,
+		Data: mustJSON(t, map[string]string{"error": "KeyError: 'unified-model'"}),
+	})
+
+	logged := buf.String()
+	if !strings.Contains(logged, "llm_failed") {
+		t.Errorf("失败未记进日志:\n%s", logged)
+	}
+	if !strings.Contains(logged, "unified-model") {
+		t.Errorf("失败原因未进日志（排障就查不出来了）:\n%s", logged)
+	}
+	// 意识流里仍只写人话，不把上游错误灌给 LLM。
+	if got := streamTextOf(a); strings.Contains(got, "KeyError") {
+		t.Errorf("上游错误不该进意识流:\n%s", got)
+	}
+}
+
+// TestStreamTextHasNoInternalIdentifiers 验证意识流里不出现内部标识。
+//
+// 意识流是唯一送给 LLM 读的文本。若把事件类型（mention/user_message）
+// 这类内部标识写进去，模型会看到自己不该看见的东西，人格叙事也脏了。
+// 曾经 sleeping 的延迟分支就写了"收到 mention，但现在不能被打断"。
+func TestStreamTextHasNoInternalIdentifiers(t *testing.T) {
+	a := newTestAgentWith(t, Options{
+		Name: "test", States: MVPStates(), Seed: 7, Initial: "sleeping",
+		Chatter: fakeChatter{}, Sink: &recordingSink{},
+	})
+	a.handleEvent(context.Background(), NewMessageEvent(IncomingMessage{
+		From: "张三", Text: "在吗", MentionsMe: true,
+	}))
+
+	got := streamTextOf(a)
+	for _, bad := range []string{"mention", "user_message", "llm_done", "llm_failed"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("意识流出现内部标识 %q:\n%s", bad, got)
+		}
+	}
+	// 但"被延迟"这个事实必须留下（§2.1：延迟量是人格的一部分）。
+	if !strings.Contains(got, "先记下") {
+		t.Errorf("延迟记录丢失:\n%s", got)
+	}
+}
+
+// streamTextOf 拼接意识流全文，仅用于测试断言。
+func streamTextOf(a *Agent) string {
+	var b strings.Builder
+	for _, e := range a.Stream {
+		b.WriteString(e.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
