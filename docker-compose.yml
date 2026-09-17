@@ -56,6 +56,14 @@ services:
       # 命名卷：删容器不丢配置。首次启动会生成配置与 local_api_key，
       # 用 `docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key` 取。
       - amkr-data:/data
+    extra_hosts:
+      # AMKR 的 provider 可以指向**宿主上已发布端口**的服务（例如同一台
+      # 机器上的另一个模型网关）。Linux 上 host.docker.internal 不会自动
+      # 存在，必须显式声明 host-gateway，否则容器里解析不了这个名字。
+      #
+      # ⚠️ 安全：这让容器能访问宿主的所有监听端口。这里只发布回环端口，
+      # 所以风险等价于容器本身；若宿主的 listen 绑到了 0.0.0.0 则不然。
+      - "host.docker.internal:host-gateway"
     # 刻意**不**发布端口：Sirius 通过服务名 amkr:8000 访问它。
     # AMKR 容器内固定监听 0.0.0.0（否则端口映射进不去），所以更要避免
     # 把 8000 映射出去 —— 那等于把完整管理权限暴露给局域网。
