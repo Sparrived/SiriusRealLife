@@ -113,6 +113,30 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 - AMKR 容器启动参数带上 `--no-ops`（见第 4 节），并在 compose 里**锁死镜像 tag**，不要用 `latest`：`/amkr/` 反代依赖前端的 `apiBase()` 行为，而该行为在版本之间变过
 - AMKR 镜像的 Dockerfile、tzdata 依赖等由 AMKR 仓库那边负责，**不在本仓库处理**。Sirius 只需假设 AMKR 的 HTTP 契约可用
 
+### 5.1 AMKR 必须自己配好 provider（否则每次调用都 500）
+
+**空配置的 AMKR 能启动、`/health` 返回 `ready: true`，但每一次 LLM 调用都失败。** 这不是"没配好但还能降级"，而是**上线即全挂**，且症状极具误导性：Sirius 侧只看到解析错误，真正的原因在 AMKR 容器里。
+
+实测过一次完整的坑：服务器上 AMKR 的 `providers` 与 `models` 都是空的、`unified_model` 为 `null`，于是请求 `model: "unified-model"`（Sirius 的默认值）时，AMKR 直接抛 `KeyError: 'unified-model'` 并返回 `500`。
+
+**部署 AMKR 后必须做完这三步，缺一不可**：
+
+| 步骤 | 配置项 | 说明 |
+|---|---|---|
+| 1 | `providers.<名>` | 上游地址 + Key。Key 放在 `keys.<名>.api_key`，同时给 `enabled: true` |
+| 2 | `models.<名>` | 模型条目，`targets[]` 指回 provider 与**上游真实模型名** |
+| 3 | `unified_model.default.primary.model` | 指向第 2 步的**条目名**。Sirius 传的 `model` 通常就是 `unified-model`，它靠这里解析 |
+
+**排障只看一处**：`/data/auto-model-key-router/server.log`（在 AMKR 容器/卷里）。`/health` 的 `ready: true` **不代表**有可用模型，两者是独立的。
+
+> `server.log` 不在宿主的 `/tmp` 可见范围里，容器有独立文件系统。
+>
+> 症状对照：`500` + 日志里 `KeyError: 'unified-model'` = 第 3 步没做；`503` = 有模型但 Key 全不可用。
+
+**provider 指向宿主端口时**：容器访问宿主已发布端口需要 `extra_hosts: ["host.docker.internal:host-gateway"]`（compose 里已加）。Linux 上该名字不会自动存在，不声明就只能写死 `172.17.0.1`——而那是默认 bridge 的网关，换网络模式即失效。
+
+> 实测记录：`127.0.0.1:<port>` 在**容器内**指向容器自己，连不通宿主；公网域名可能被 Cloudflare 按 UA 拦（`403 error code: 1010`，那是边缘拦截而非上游鉴权失败，别据此判断 Key 有问题）。
+
 ## 6. 已知契约要点（实现时的检查清单）
 
 来自对 AMKR 源码与文档的核对，容易踩：
@@ -124,6 +148,9 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 | 管理 API | 前缀 `/api/*`，需要本地 key；响应含 `config_revision`，写操作要带版本号否则 `409` |
 | 运维 API | `/api/logs`、`/api/tool`、`/api/service/*`、`/api/integrations/*`，默认**开启**且同样只需本地 key。容器里用 `--no-ops` 关掉（见第 4 节）；只靠反代拉黑时四条都要覆盖 |
 | 服务未就绪 | 无可用 Key 时返回 `503`；上游失败返回 `502` |
+| 只配 `unified_model` 不够 | 还必须配 `providers` 与 `models`，否则请求 `unified-model` 抛 `KeyError` → `500`（见 §5.1） |
+| `ready: true` ≠ 有模型 | `/health` 只表示进程就绪。空配置也是 `ready: true`，但每次调用都 500 |
+| `response_format` | 可传 `json_schema`；**忽略它的路由不一定报错**，可能 200 + 散文（见 §2「结构化输出」） |
 | 任务路由冲突 | 任务名与模型名撞名会在**配置加载时**直接报错，不是运行时 |
 | 参数冲突 | 请求里显式传了任务已固定的采样参数 → `400`（见第 2 节） |
 | 容器 | 镜像 `ghcr.io/sparrived/auto-model-key-router`（tag 为版本号，正式版另带 `latest`）。容器内固定监听 `0.0.0.0`（否则端口映射进不去），端口默认 8000，状态在卷 `/data`（配置为 `/data/auto-model-key-router/router-config.json`）。因此 **AMKR 容器不应发布端口**，只让 Sirius 通过服务名访问 |
