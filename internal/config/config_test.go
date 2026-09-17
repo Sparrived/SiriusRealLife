@@ -14,6 +14,7 @@ func TestFromEnvDefaults(t *testing.T) {
 	t.Setenv("SIRIUS_TICK_INTERVAL", "")
 	t.Setenv("SIRIUS_SEED", "")
 	t.Setenv("SIRIUS_START_TICK", "")
+	t.Setenv("SIRIUS_MONOLOGUE_EVERY", "")
 
 	opt, err := FromEnv()
 	if err != nil {
@@ -28,6 +29,34 @@ func TestFromEnvDefaults(t *testing.T) {
 	}
 	if opt.Seed == 0 {
 		t.Error("应当有默认种子")
+	}
+	// 独白间隔是成本闸门，必须有非零默认值：0 会被 fsm 当作
+	// "用默认值"，但显式配置成 0 意味着不节流（每次进入都调 LLM）。
+	if opt.MonologueEvery != 30 {
+		t.Errorf("默认独白间隔 = %d, 期望 30", opt.MonologueEvery)
+	}
+}
+
+// TestMonologueEveryEnv 验证成本闸门可用环境变量调整。
+func TestMonologueEveryEnv(t *testing.T) {
+	// 显式给值：按 tick 数直接生效。
+	t.Setenv("SIRIUS_MONOLOGUE_EVERY", "120")
+	opt, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if opt.MonologueEvery != 120 {
+		t.Errorf("独白间隔 = %d, 期望 120", opt.MonologueEvery)
+	}
+
+	// 0 表示不节流，映射成 fsm 约定的负值。
+	t.Setenv("SIRIUS_MONOLOGUE_EVERY", "0")
+	opt, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	if opt.MonologueEvery >= 0 {
+		t.Errorf("0 应映射为不节流（负值），实际 %d", opt.MonologueEvery)
 	}
 }
 
@@ -102,6 +131,8 @@ func TestRejectsBadValues(t *testing.T) {
 		{"SIRIUS_SEED", "not-a-number"},
 		{"SIRIUS_START_TICK", "x"},
 		{"SIRIUS_ALLOW_OPS", "maybe"},
+		{"SIRIUS_MONOLOGUE_EVERY", "abc"},
+		{"SIRIUS_MONOLOGUE_EVERY", "-1"},
 	}
 	for _, c := range cases {
 		t.Run(c.key+"="+c.val, func(t *testing.T) {

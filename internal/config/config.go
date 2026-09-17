@@ -27,6 +27,11 @@ type Options struct {
 	LogLevel     slog.Level
 	AMKR         llm.Config
 
+	// MonologueEvery 是两次内心独白之间的最小 tick 间隔。
+	// 这是**成本闸门**：独白会真的调用 LLM，0 = 每次进入状态都调用
+	// （按 1 秒/tick 折算约每天两千多次），因此必须可调。
+	MonologueEvery fsm.Tick
+
 	// AllowNonLoopback 为真时允许绑定非回环地址（容器部署必需）。
 	// 由 SIRIUS_ALLOW_NON_LOOPBACK 显式开启，默认关闭。
 	AllowNonLoopback bool
@@ -84,6 +89,26 @@ func FromEnv() (Options, error) {
 		opt.AllowNonLoopback = b
 	}
 	opt.LogLevel = parseLevel(envOr("SIRIUS_LOG_LEVEL", "info"))
+
+	// 独白间隔：默认 30 游戏分钟。这是成本闸门——独白会真的调用 LLM。
+	//
+	// 语义对齐 fsm：正值 = 最小间隔 tick 数；env 传 0 = **不节流**
+	// （每次进入状态都调用，调试用，成本很高），在 fsm 侧用 -1 表示。
+	// 负数直接拒绝，避免"想更疏"被误写成关掉独白。
+	opt.MonologueEvery = 30
+	if v := strings.TrimSpace(os.Getenv("SIRIUS_MONOLOGUE_EVERY")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return Options{}, fmt.Errorf("config: SIRIUS_MONOLOGUE_EVERY 不是整数 %q: %w", v, err)
+		}
+		if n < 0 {
+			return Options{}, fmt.Errorf("config: SIRIUS_MONOLOGUE_EVERY 不能为负，得到 %d", n)
+		}
+		if n == 0 {
+			n = -1 // 不节流
+		}
+		opt.MonologueEvery = fsm.Tick(n)
+	}
 
 	amkr, err := llm.ConfigFromEnv()
 	if err != nil {

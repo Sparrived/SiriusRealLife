@@ -74,6 +74,15 @@ func run() error {
 		Attention: store,
 		Ticker:    store,               // 让 agent 的 tick 驱动记忆的衰减/升格（R8）
 		Observe:   broadcaster.Publish, // 值快照，不共享 agent 内部状态（R1）
+		// 外部消息的落点：没有它，unread 队列与待选区永远是空的
+		// （记忆链路整条失效）。
+		Sink: store,
+		// 意识流由 LLM 生成，而不是写死的旁白。异步、可被抢占（R4）。
+		// 间隔可调：它是唯一的 LLM 成本闸门（SIRIUS_MONOLOGUE_EVERY）。
+		Monologue:      true,
+		MonologueEvery: opt.MonologueEvery,
+		// 打捞把长期记忆接回 prompt（memory.md §5.1）。
+		Dredge: store.DredgeFor(),
 	})
 	if err != nil {
 		return err
