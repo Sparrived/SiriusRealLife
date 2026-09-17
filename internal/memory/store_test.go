@@ -1,0 +1,369 @@
+package memory
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/Sparrived/SiriusRealLife/internal/fsm"
+)
+
+func newStore() *Store { return New(DefaultOptions()) }
+
+// TestInterruptOnlyMentionOrReply 验证 §2.1 的三类消息门控。
+func TestInterruptOnlyMentionOrReply(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{"@我", Message{Text: "@我 在吗", MentionsMe: true}, true},
+		{"回复我", Message{Text: "同意", RepliesToMe: true}, true},
+		{"普通群消息", Message{Text: "今天天气不错"}, false},
+		{"两者都是", Message{MentionsMe: true, RepliesToMe: true}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore()
+			if got := s.Ingest(c.msg); got != c.want {
+				t.Errorf("打断 = %v, 期望 %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestUnreadQueueIsBoundedAndDropsByImportance 验证 §2.2/R5：
+// 队列有上限，溢出时**按重要性丢弃**而不是丢最旧的。
+func TestUnreadQueueIsBoundedAndDropsByImportance(t *testing.T) {
+	opt := DefaultOptions()
+	opt.UnreadLimit = 5
+	s := New(opt)
+
+	// 一条高重要性的"@我"最先到，随后灌入大量低重要性消息。
+	// 若按"丢最旧"实现，这条会被丢掉——这正是本测试要抓的。
+	s.Ingest(Message{Text: "重要的@", MentionsMe: true})
+	for i := 0; i < 20; i++ {
+		s.Ingest(Message{Text: fmt.Sprintf("水群 %d", i)})
+	}
+
+	if got := s.UnreadCount(); got > 5 {
+		t.Fatalf("未读计数 = %d, 超过上限 5", got)
+	}
+	if s.Dropped() == 0 {
+		t.Error("应当记录丢弃计数")
+	}
+	// 高重要性那条必须还在（它是队列里最旧的一条）。
+	found := false
+	for _, m := range s.messages {
+		if m.MentionsMe {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("溢出后高重要性的 @我 被丢掉了（应当丢重要性最低的，而不是最旧的）")
+	}
+	// 反过来确认：丢掉的是低重要性的水群消息。
+	for _, m := range s.messages {
+		if m.Importance < 2 {
+			t.Errorf("应当优先丢掉低重要性消息，却留下了 importance=%d 的 %q", m.Importance, m.Text)
+		}
+	}
+}
+
+// TestScanAdvancesCursor 验证 §2.3：已读游标必须推进，
+// 否则退出再进入"看 QQ"会返回同样内容、原地空转。
+func TestScanAdvancesCursor(t *testing.T) {
+	s := newStore()
+	for i := 0; i < 6; i++ {
+		s.Ingest(Message{Text: fmt.Sprintf("msg %d", i)})
+	}
+
+	first := s.Scan(3)
+	if len(first) != 3 {
+		t.Fatalf("首次扫一眼返回 %d 条, 期望 3", len(first))
+	}
+	// 扫一眼看到的是**最近**的：ID 4,5,6。
+	if first[2].ID != 6 {
+		t.Errorf("扫一眼应拿到最新的消息（ID 6），实际最后一条 ID=%d", first[2].ID)
+	}
+	if c := s.Cursor(); c != 6 {
+		t.Errorf("游标 = %d, 期望 6", c)
+	}
+
+	// 再来新消息，扫一眼应拿到新的，而不是重复旧的。
+	for i := 0; i < 2; i++ {
+		s.Ingest(Message{Text: fmt.Sprintf("新消息 %d", i)})
+	}
+	second := s.Scan(3)
+	if len(second) != 2 {
+		t.Fatalf("第二次扫一眼返回 %d 条, 期望 2（只剩 2 条新的）", len(second))
+	}
+	for _, a := range first {
+		for _, b := range second {
+			if a.ID == b.ID {
+				t.Fatalf("两次扫一眼返回了同一条消息 %d（游标没推进）", a.ID)
+			}
+		}
+	}
+	// 没有新消息时再扫应当为空。
+	if got := s.Scan(3); len(got) != 0 {
+		t.Errorf("没有新消息时应返回空，得到 %d 条", len(got))
+	}
+}
+
+// TestUnreadCountOnlyCountsAfterCursor 验证读过的不再推高"烦躁"。
+func TestUnreadCountOnlyCountsAfterCursor(t *testing.T) {
+	s := newStore()
+	for i := 0; i < 5; i++ {
+		s.Ingest(Message{Text: "x"})
+	}
+	if got := s.UnreadCount(); got != 5 {
+		t.Fatalf("未读计数 = %d, 期望 5", got)
+	}
+	s.Scan(5)
+	if got := s.UnreadCount(); got != 0 {
+		t.Fatalf("扫完后未读计数 = %d, 期望 0", got)
+	}
+}
+
+// TestBrowsePagesBackwards 验证 §2.3 的第二级：翻页能往更旧翻，且不与
+// 已读游标打架（两级读取各有自己的位置）。
+func TestBrowsePagesBackwards(t *testing.T) {
+	s := newStore()
+	for i := 0; i < 10; i++ {
+		s.Ingest(Message{Text: fmt.Sprintf("msg %d", i)})
+	}
+	s.Scan(3) // 看了最新 3 条（ID 8,9,10）
+
+	page1 := s.Browse(3)
+	if len(page1) != 3 {
+		t.Fatalf("翻页返回 %d 条, 期望 3", len(page1))
+	}
+	// 翻到的必须比已读游标更旧。
+	for _, m := range page1 {
+		if m.ID >= s.Cursor() {
+			t.Errorf("翻到 ID=%d, 不应 >= 游标 %d", m.ID, s.Cursor())
+		}
+	}
+	page2 := s.Browse(3)
+	// 第二页不能与第一页重叠。
+	for _, a := range page1 {
+		for _, b := range page2 {
+			if a.ID == b.ID {
+				t.Fatalf("翻页重叠：ID %d 出现两次", a.ID)
+			}
+		}
+	}
+	// 正序返回，便于拼进 prompt。
+	for i := 1; i < len(page2); i++ {
+		if page2[i-1].ID > page2[i].ID {
+			t.Error("翻页结果应按时间正序返回")
+		}
+	}
+}
+
+// TestDredgeReturnsWholeSession 验证 §5.1：打捞返回**整段**翻阅上下文，
+// 而不是孤立的一条——单条会失去含义。
+func TestDredgeReturnsWholeSession(t *testing.T) {
+	s := newStore()
+	sess := s.NewSession()
+	// 同一会话的三条：只有第一条含关键词，另两条是它的上下文。
+	s.WriteStaging(sess, "周末去看展吗", []string{"看展", "周末"}, 5, 1)
+	s.WriteStaging(sess, "好啊", nil, 3, 1)
+	s.WriteStaging(sess, "那你去吧", nil, 3, 1)
+	// 另一个会话，不该被带出来。
+	other := s.NewSession()
+	s.WriteStaging(other, "记得交周报", []string{"周报"}, 6, 1)
+
+	got := s.Dredge([]string{"看展"}, 10)
+	if len(got) != 1 {
+		t.Fatalf("命中会话数 = %d, 期望 1", len(got))
+	}
+	seg := got[0]
+	for _, want := range []string{"周末去看展吗", "好啊", "那你去吧"} {
+		if !strings.Contains(seg, want) {
+			t.Errorf("整段里缺少 %q；实际为 %q", want, seg)
+		}
+	}
+	if strings.Contains(seg, "周报") {
+		t.Error("不该把别的会话带出来")
+	}
+}
+
+// TestDredgeRefreshesStrength 验证 §4：打捞行为本身刷新记忆曲线。
+func TestDredgeRefreshesStrength(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "内容", []string{"关键词"}, 5, 1)
+
+	// 衰减一阵子。
+	for i := 0; i < 300; i++ {
+		s.Tick(fsm.Tick(i))
+	}
+	before := s.Staging()[0].Strength
+	if before >= 1.0 {
+		t.Fatalf("应当已衰减，实际强度 %v", before)
+	}
+
+	s.Dredge([]string{"关键词"}, 400)
+	after := s.Staging()[0].Strength
+	if after != 1.0 {
+		t.Fatalf("打捞后强度 = %v, 期望刷新为 1.0", after)
+	}
+}
+
+// TestDecayToShadow 验证 §4 与验收 6：长期不打捞的记忆沉入 Shadow，
+// 且 Shadow 内容不再可被打捞（LLM 读不到）。
+func TestDecayToShadow(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "会被忘掉的事", []string{"秘密关键词"}, 3, 0)
+
+	// 跑足够久让它衰减到阈值以下。
+	for i := 0; i < 1200; i++ {
+		s.Tick(fsm.Tick(i))
+	}
+	if s.ShadowLen() == 0 {
+		t.Fatal("长期不打捞的记忆应当沉入 Shadow")
+	}
+	if len(s.Staging()) != 0 {
+		t.Fatal("沉入 Shadow 后不应留在待选区")
+	}
+	// 关键：Shadow 里的东西**打捞不到**（LLM 不可读）。
+	if got := s.Dredge([]string{"秘密关键词"}, 1300); len(got) != 0 {
+		t.Fatalf("Shadow 内容不应被打捞出来，却得到 %v", got)
+	}
+	// 但审计接口能拿到（给人看，§3.1）。
+	if len(s.ShadowAudit()) == 0 {
+		t.Fatal("审计接口应当能读到 Shadow")
+	}
+	// 审计内容里应当有原文，证明是"存档"而非"删除"。
+	if !strings.Contains(strings.Join(s.ShadowAudit(), "\n"), "会被忘掉的事") {
+		t.Error("Shadow 应保留原文以供审计")
+	}
+}
+
+// TestPromoteByFrequencyDeletesSource 验证 §5.3 + §3.2：
+// 高频打捞触发升格，且**源条目删除**（防重复升格产生相似事件记忆）。
+func TestPromoteByFrequencyDeletesSource(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "被反复想起的事", []string{"反复"}, 5, 0)
+
+	// 窗口内打捞 3 次（PromoteDredges 默认 3）。
+	for i := 0; i < 3; i++ {
+		s.Dredge([]string{"反复"}, fsm.Tick(10+i))
+	}
+	s.Tick(20)
+
+	if len(s.Events()) != 1 {
+		t.Fatalf("事件记忆数 = %d, 期望 1", len(s.Events()))
+	}
+	if len(s.Staging()) != 0 {
+		t.Fatal("升格后源条目必须删除（否则会被反复升格）")
+	}
+
+	// 再跑若干 tick，不应产生第二条相同的事件记忆。
+	for i := 0; i < 200; i++ {
+		s.Tick(fsm.Tick(21 + i))
+	}
+	if n := len(s.Events()); n != 1 {
+		t.Fatalf("事件记忆数变成了 %d，源条目未被删除", n)
+	}
+}
+
+// TestPromoteByImportanceWithSingleDredge 验证 §5.3 的重要性对冲：
+// 高 importance 只需被打捞一次即可升格，避免"被 @ 的重要消息因没人翻到而消失"。
+func TestPromoteByImportanceWithSingleDredge(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "很重要的事", []string{"重要"}, 8, 0)
+
+	s.Dredge([]string{"重要"}, 5)
+	s.Tick(6)
+
+	if len(s.Events()) != 1 {
+		t.Fatalf("importance=8 且被打捞一次应当升格，事件数 = %d", len(s.Events()))
+	}
+}
+
+// TestLowImportanceNeedsRepeatedDredge 验证低重要性不会被单次打捞升格。
+func TestLowImportanceNeedsRepeatedDredge(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "琐事", []string{"琐事"}, 2, 0)
+
+	s.Dredge([]string{"琐事"}, 5)
+	s.Tick(6)
+
+	if len(s.Events()) != 0 {
+		t.Fatal("低重要性且只打捞一次不应升格")
+	}
+}
+
+// TestDredgeWindowExpiry 验证滑动窗口：久远的打捞不计入升格判定。
+func TestDredgeWindowExpiry(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "很久以前被翻过", []string{"久远"}, 2, 0)
+
+	// 三次打捞都发生在窗口之外（窗口默认 100 tick）。
+	for i := 0; i < 3; i++ {
+		s.Dredge([]string{"久远"}, fsm.Tick(i))
+	}
+	// 推进到窗口已过期。
+	for t := fsm.Tick(200); t < 260; t++ {
+		s.Tick(t)
+	}
+	if len(s.Events()) != 0 {
+		t.Fatal("窗口外的打捞不应触发升格")
+	}
+}
+
+// TestDredgeEmptyQueryReturnsNothing 验证空查询不误命中。
+func TestDredgeEmptyQueryReturnsNothing(t *testing.T) {
+	s := newStore()
+	s.WriteStaging(s.NewSession(), "任何内容", []string{"k"}, 5, 0)
+	if got := s.Dredge(nil, 1); len(got) != 0 {
+		t.Fatalf("空查询应当不命中，却得到 %v", got)
+	}
+	if got := s.Dredge([]string{"  "}, 1); len(got) != 0 {
+		t.Fatalf("空白查询应当不命中，却得到 %v", got)
+	}
+}
+
+// TestEmphasisOnlyEntryNotDredgedByOtherSession 验证会话隔离：
+// 命中一个会话不会把另一个会话的相似内容带出来。
+func TestSessionIsolation(t *testing.T) {
+	s := newStore()
+	a := s.NewSession()
+	s.WriteStaging(a, "聊看展", []string{"看展"}, 5, 0)
+	b := s.NewSession()
+	s.WriteStaging(b, "另一个会话也提了看展", []string{"看展"}, 5, 0)
+
+	got := s.Dredge([]string{"看展"}, 5)
+	if len(got) != 2 {
+		t.Fatalf("两个会话都含关键词，应返回 2 段，得到 %d", len(got))
+	}
+}
+
+// TestKeywordsNormalized 验证关键词归一化（大小写、空白、去重）。
+func TestKeywordsNormalized(t *testing.T) {
+	s := newStore()
+	e := s.WriteStaging(s.NewSession(), "text", []string{"  看展  ", "看展", "KANZHAN", ""}, 5, 0)
+	got := e.Keywords
+	if len(got) != 2 {
+		t.Fatalf("归一化后关键词 = %v, 期望 2 个", got)
+	}
+	// 小写化后应当能命中。
+	if hit := s.Dredge([]string{"kanzhan"}, 1); len(hit) == 0 {
+		t.Error("关键词应大小写不敏感")
+	}
+}
+
+// TestImportanceClamped 验证 importance 被夹到 1–10。
+func TestImportanceClamped(t *testing.T) {
+	s := newStore()
+	lo := s.WriteStaging(s.NewSession(), "a", nil, -5, 0)
+	if lo.Importance != 1 {
+		t.Errorf("importance = %d, 期望夹到 1", lo.Importance)
+	}
+	hi := s.WriteStaging(s.NewSession(), "b", nil, 99, 0)
+	if hi.Importance != 10 {
+		t.Errorf("importance = %d, 期望夹到 10", hi.Importance)
+	}
+}
