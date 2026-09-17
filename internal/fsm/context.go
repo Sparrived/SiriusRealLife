@@ -21,7 +21,11 @@ type CallSite string
 const (
 	// SiteMonologue 内心独白：写意识流。
 	SiteMonologue CallSite = "monologue"
-	// SiteDispatch 状态分派：决定下一步做什么。
+	// SiteDispatch 状态决策：决定继续待着还是换个状态。
+	//
+	// 名字保留为 dispatch，但语义已经变了：它不再是"框架抽取一个状态"，
+	// 而是"问人格要不要换"。任务是同一个（同一个 AMKR 任务名），
+	// 因此不改名以免动部署配置。
 	SiteDispatch CallSite = "dispatch"
 	// SiteToolRead 工具结果解读。
 	SiteToolRead CallSite = "tool_read"
@@ -152,7 +156,21 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 		b.WriteString(`{"thought":"此刻在想什么","action":"正在做的动作，没有就填空串","intent":"接下来打算做什么，没有就填空串"}`)
 		b.WriteString("\n第一人称、口语、一两句就够。不要复述上面的设定，不要解释，不要客套。")
 	case SiteDispatch:
-		b.WriteString("\n接下来做什么？只回一个动作短语，不要解释。")
+		// 决策点：把"为什么现在问你"和"你能怎么选"讲清楚，然后要求
+		// **必须调用工具**。
+		//
+		// 为什么强调必须调工具：实测某些路由会静默忽略 tools 参数
+		// 而只回一段散文（wb2api 就是这样）。那种回复无法驱动状态，
+		// 框架会降级为"原样再待一会"——所以 prompt 里再要一次，
+		// 让支持工具的路由真的给出工具调用。
+		if why := a.whyNowText(); why != "" {
+			fmt.Fprintf(&b, "\n【为什么现在问你】%s\n", why)
+		}
+		b.WriteString("\n【你可以做的选择】\n")
+		b.WriteString(a.menuText())
+		b.WriteString("\n请**调用一个工具**来表达决定，不要只用文字回答。")
+		b.WriteString("先说你此刻在想什么（一两句、第一人称、口语），再调工具。")
+		b.WriteString("\n只有你自己能做这个决定：不想换就调 stay，觉得该做别的了就调 enter_state。")
 	case SiteToolRead:
 		b.WriteString("\n把上面的结果用一句话说成人话。")
 	}

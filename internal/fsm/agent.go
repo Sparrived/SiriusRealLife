@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"strings"
 )
 
 // StreamEntry 是意识流里的一条记录。
@@ -91,12 +91,19 @@ type Agent struct {
 	Stream    []StreamEntry
 	CallCount int // LLM 调用次数（测试与 SSE 观测用）
 
-	states        map[StateName]State
-	order         []State // 稳定顺序，保证分派可复现（R3）
-	enteredAt     Tick
-	dwellUntil    Tick // 进入时随机决定的换出时刻
+	states    map[StateName]State
+	order     []State // 稳定顺序，保证候选清单与日志顺序一致
+	enteredAt Tick
+	// decideAt 是下次该问 LLM"要不要换"的时刻。
+	//
+	// 这是"检查点"机制的载体：**由 LLM 自己指定**（stay/enter_state 的
+	// for_ticks），而不是框架在区间里随机取一个。它回答的正是
+	// "这次问我，下次什么时候再问"。
+	decideAt Tick
+	// pending 是攒下的"为什么现在问你"（见 decide.go 的 Trigger）。
+	// 决策完成后清空；期间新到的理由会累加，让模型一次看到全部。
+	pending       []Trigger
 	cooldownUntil map[StateName]Tick
-	rng           *rand.Rand
 	events        chan Event
 	chatter       Chatter
 	log           *slog.Logger
@@ -130,11 +137,10 @@ type Agent struct {
 	dredge func(query []string, now Tick) []string
 }
 
-// Options 是构造 Agent 的参数。种子显式传入使 30-tick 验收可复现（R3）。
+// Options 是构造 Agent 的参数。
 type Options struct {
 	Name    string
 	States  []State
-	Seed    int64
 	Chatter Chatter
 	Logger  *slog.Logger
 	// Initial 是初始状态名；省略则用状态表第一个。
@@ -258,7 +264,6 @@ func New(opt Options) (*Agent, error) {
 		states:         states,
 		order:          opt.States,
 		Now:            opt.StartTick,
-		rng:            rand.New(rand.NewSource(opt.Seed)),
 		events:         make(chan Event, 64),
 		chatter:        opt.Chatter,
 		log:            logger.With("agent", opt.Name),
@@ -278,7 +283,9 @@ func New(opt Options) (*Agent, error) {
 	if a.ctxLimits == (ContextLimits{}) {
 		a.ctxLimits = DefaultContextLimits()
 	}
-	a.enter(initial, "init")
+	// 初始状态由配置指定，不走决策：开局就问 LLM 会让启动依赖网络，
+	// 而她"醒来时在哪"本来就该是人格设定的一部分。
+	a.enter(initial, "init", "初始状态", a.states[initial].MinTick)
 	return a, nil
 }
 
@@ -290,15 +297,24 @@ func (a *Agent) LastRecord() DispatchRecord { return a.lastRecord }
 
 // PlannedDuration 返回当前状态本次计划的停留时长。
 //
-// 在 OnEnter 里可用：enter() 先算好 dwellUntil 再调 OnEnter，因此
+// 在 OnEnter 里可用：enter() 先算好 decideAt 再调 OnEnter，因此
 // 状态的副作用能按"这次要待多久"来定成本，而不是每次进入扣一个
-// 与时长无关的固定值。这点很重要——"干活越久越累"才对，
-// 而 working 一天要进入几十次，固定扣费会让人格长期精疲力尽。
-func (a *Agent) PlannedDuration() Tick { return a.dwellUntil - a.Now }
+// 与时长无关的固定值。
+//
+// 注意它只是**计划**：LLM 可以中途改主意（`stay` 会重设 decideAt，
+// 退出条件成立会提前问）。因此逐 tick 计费的 EnergyPerTick 才是
+// 主渠道，这里的值只适合"进入时的一次性成本"。
+func (a *Agent) PlannedDuration() Tick { return a.decideAt - a.Now }
 
-// enter 进入一个状态：执行 onExit/onEnter、设置停留目标、记冷却。
-func (a *Agent) enter(name StateName, reason string) {
+// enter 进入一个状态：执行 onExit/onEnter、设置检查点、记冷却。
+//
+// `why` 与 `forTicks` 由 LLM 给出（forTicks 已夹紧）。**不含随机**：
+// 停留多久由模型决定，框架只保证它落在 [MinTick, MaxTick] 内。
+func (a *Agent) enter(name StateName, reason, why string, forTicks Tick) {
 	prev := a.Current
+	// 候选快照必须在改动 Current **之前**取：survey 是拿 a.Current
+	// 去判断"哪个是当前状态"的，改完再取会把新状态标成"就是现在待着的"。
+	cands := a.survey()
 	if prev != "" {
 		if s, ok := a.states[prev]; ok && s.OnExit != nil {
 			s.OnExit(a)
@@ -310,37 +326,45 @@ func (a *Agent) enter(name StateName, reason string) {
 	}
 	a.Current = name
 	a.enteredAt = a.Now
+	a.decideAt = a.Now + forTicks
 
-	s := a.states[name]
-	// 停留时长在进入时一次性随机决定：随机只在"该换状态了"这一刻介入。
-	span := s.MaxTick - s.MinTick
-	var extra Tick
-	if span > 0 {
-		extra = Tick(a.rng.Int63n(int64(span) + 1))
-	}
-	a.dwellUntil = a.Now + s.MinTick + extra
-
-	if s.OnEnter != nil {
+	if s := a.states[name]; s.OnEnter != nil {
 		s.OnEnter(a)
-	}
-	if prev != "" {
-		a.lastRecord = DispatchRecord{
-			From: prev, To: name, Reason: reason, Seq: a.Now,
-			Candidates: a.lastRecord.Candidates, Roll: a.lastRecord.Roll, Total: a.lastRecord.Total,
-		}
-		a.logTransition(a.lastRecord)
 	}
 	// 独白在 OnEnter **之后**发起：这样上下文里已经包含"我刚进入
 	// 这个状态"这条动作记录，模型才知道自己正在做什么。
-	// 它不阻塞：Think 只起 goroutine，结果以事件回来（R4）。
-	a.maybeThink()
+	// 它不阻塞：think 只起 goroutine，结果以事件回来（R4）。
+	//
+	// 位置很关键——它必须是**进入状态**时的一次性动作，不能挪到
+	// Step 里逐 tick 调用。后者在节流关掉时（MonologueEvery 为负）
+	// 会变成每 tick 一次 LLM 调用：既贵，又会让在途通道永远占满，
+	// 决策再也插不进去，人格于是卡死在初始状态。
+	a.monologue()
+
+	// prev=="" 是构造时的初始进入：那不是一次"转移"，没有复盘价值，
+	// 因此不写记录（否则日志里会出现一条 from="" 的假转移）。
+	if prev != "" {
+		a.lastRecord = DispatchRecord{
+			From: prev, To: name, Reason: reason, Why: why,
+			ForTicks: forTicks, Candidates: cands, Seq: a.Now,
+		}
+		a.logDecision(a.lastRecord)
+	}
 }
 
-// maybeThink 在启用独白时异步发起一次内心独白。
+// monologue 在启用时异步发起一次内心独白。
+//
+// 调用时机是**进入状态**（由 enter 调用），不是每 tick：独白回答的是
+// "刚进入这个状态时我在想什么"，逐 tick 问既贵又会把在途通道占满，
+// 让决策永远插不进来。
 //
 // 失败静默：独白是锦上添花，起不来（已有在途调用、未配 Chatter）
 // 不该影响状态机。LLM 调用本身的失败以 EventLLMFailed 回到意识流。
-func (a *Agent) maybeThink() {
+//
+// 与决策共用同一条在途通道（a.thinking）：一次只允许一个 LLM 调用在途。
+// 决策优先——`consider` 发现已有在途调用时会留着理由下个 tick 再问，
+// 而独白发现被占用就放弃（它只是锦上添花）。
+func (a *Agent) monologue() {
 	if !a.monologueOn || a.chatter == nil {
 		return
 	}
@@ -354,17 +378,16 @@ func (a *Agent) maybeThink() {
 		return
 	}
 	// context.Background()：独白不绑定某次 tick，生命周期由
-	// cancelThinking 管（抢占时取消，见 R4）。
-	err := a.Think(context.Background(), ChatRequest{
+	// cancelThinking 管（取消在 Run 里，见 R4）。
+	err := a.think(context.Background(), ChatRequest{
 		Prompt: a.Context(SiteMonologue, a.contextOptions()),
 		Schema: &monologueSchema,
-	})
+	}, thinkMonologue)
 	if err != nil {
-		// 起不来（多半是上一次独白还在途）：**绝不能**改写
+		// 起不来（多半是上一次调用还在途）：**绝不能**改写
 		// inFlightState —— 那会把在途结果错记到刚进入的这个状态名下。
 		return
 	}
-	a.inFlightState = a.Current
 	a.lastMonologueAt = a.Now
 	a.monologueSent = true
 }
@@ -385,18 +408,20 @@ func (a *Agent) contextOptions() ContextOptions {
 	}
 }
 
-// logTransition 输出 R6 要求的结构化转移日志。字段不用字符串拼。
+// logDecision 输出 R6 要求的结构化决策日志。
 //
-// 候选项快照用 slog.Any 序列化成 JSON 数组：这是复盘"为什么选了这个
-// 状态"的唯一依据，必须与当次抽取的 roll/total 一起出现。
-func (a *Agent) logTransition(r DispatchRecord) {
-	a.log.Info("state_transition",
+// 内容与旧的 logTransition 不同：**没有随机数**（不再有抽取），取而代之
+// 的是 LLM 说的话（why）与当时摆给它的完整清单（含被挡掉的及原因）。
+// 这才是现在唯一能复盘"为什么换了这个状态"的依据——决定不在框架里，
+// 在模型的理由里。因此 why 必须落盘，不能只进意识流。
+func (a *Agent) logDecision(r DispatchRecord) {
+	a.log.Info("state_decision",
 		slog.String("from", string(r.From)),
 		slog.String("to", string(r.To)),
 		slog.String("reason", r.Reason),
+		slog.String("why", r.Why),
+		slog.Int64("for_ticks", int64(r.ForTicks)),
 		slog.Int64("seq", int64(r.Seq)),
-		slog.Float64("roll", r.Roll),
-		slog.Float64("total", r.Total),
 		slog.Any("candidates", r.Candidates),
 	)
 }
@@ -436,36 +461,41 @@ func (a *Agent) decayMood() {
 
 // Step 前进一个 tick。这是业务逻辑的唯一时间入口（R8）。
 //
-// 顺序：先处理到达的事件，再推时间，泵一次订阅，最后判断是否该换状态。
+// 顺序：先处理到达的事件，再推时间，泵一次订阅，最后看是否该问 LLM
+// "要不要换"。**随机不再介入任何一步**：该不该换、换成什么、待多久
+// 全部由模型决定，框架只负责夹紧与挡掉不可选项。
 func (a *Agent) Step(ctx context.Context) {
 	a.drainEvents(ctx)
 	a.Now++
 	a.decayMood()
+	a.chargeState()
 	// 记忆层跟着时间前进（衰减/升格/遗忘全按 tick 判定，R8）。
-	// 放在这里而不是 dispatch 之后：即使本次要换状态，记忆也该按
+	// 放在这里而不是决策之后：即使本次要换状态，记忆也该按
 	// 新 tick 结算，两者没有先后依赖。
 	if a.ticker != nil {
 		a.ticker.Tick(a.Now)
 	}
-	// 订阅泵入（"状态持续"的机制落点）。放在换状态判断**之前**：
+	// 订阅泵入（"状态持续"的机制落点）。放在决策**之前**：
 	// 这样本 tick 到达的消息能参与这次是否该换状态的判断。
 	// 它必须每 tick 都跑，否则"刷手机时来了新消息"就看不见了。
 	a.Pump()
 
-	if a.Now >= a.dwellUntil {
-		next, rec, err := a.dispatch()
-		if err != nil {
-			// 无候选不是致命错误：留在原状态并记录，避免死循环。
-			a.log.Warn("dispatch_failed", slog.String("err", err.Error()))
-			// 延长停留，否则每个 tick 都会重试。
-			a.dwellUntil = a.Now + 1
-			a.emit()
-			return
-		}
-		a.lastRecord = rec
-		a.enter(next, "timeout")
-	}
+	// 决策点：到点了就问一次 LLM。它异步发起，不阻塞本 tick（R4）。
+	a.consider(ctx)
 	a.emit()
+}
+
+// chargeState 按当前状态逐 tick 收精力成本。
+//
+// 逐 tick 而不是进入时一次扣清：停留时长由 LLM 决定，"stay 三次续了
+// 很长"与"待了很久"应当一样累。见 State.EnergyPerTick。
+func (a *Agent) chargeState() {
+	s := a.states[a.Current]
+	if s.EnergyPerTick == 0 {
+		return
+	}
+	a.Mood.Energy -= s.EnergyPerTick
+	a.Mood.Clamp()
 }
 
 // drainEvents 非阻塞地处理所有待处理事件。
@@ -496,7 +526,7 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 	case EventLLMDone:
 		a.settleThinking()
 		a.CallCount++
-		a.absorbMonologue(ev.Data)
+		a.absorbLLM(ev.Data)
 	case EventLLMFailed:
 		a.settleThinking()
 		// 失败原因必须进结构化日志，**不能**只留在意识流里。
@@ -504,11 +534,23 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 		// 而排障需要的是上游原文。曾经因为把错误吞掉，容器里所有独白
 		// 静默失败、只看到一堆"没想出来"，只能去翻 AMKR 的日志文件
 		// 才知道是 unified-model 解析不到（R10：不重试，但要能看见）。
+		var p struct {
+			Kind string `json:"kind"`
+		}
+		if len(ev.Data) > 0 {
+			_ = json.Unmarshal(ev.Data, &p)
+		}
 		a.appendStreamKind(KindThought, "话到嘴边没想出来")
 		a.log.Warn("llm_failed",
+			slog.String("kind", p.Kind),
 			slog.String("state", string(a.Current)),
 			slog.String("err", llmError(ev.Data)),
 		)
+		// 决策调用失败要**降级**，否则这次询问就永远丢了：没人再问，
+		// 人格会卡在这个状态里出不去。降级成"原样再待一会"，下次再问。
+		if p.Kind == string(thinkDecision) {
+			a.commitStay(defaultStayTick, "没想出来，先按原样待着")
+		}
 	default:
 		a.log.Warn("unknown_event", slog.String("kind", string(ev.Kind)))
 	}
@@ -558,20 +600,40 @@ func llmError(data json.RawMessage) string {
 	return p.Error
 }
 
-// absorbMonologue 把一次独白的回复解析成带类型的意识流记录。
+// absorbLLM 按调用种类分发一次 LLM 结果。
+//
+// 分类在这里而不是在 think 里：结果必须回到 agent 自己的 goroutine
+// 才能改状态（R1），分发是 agent 的事。
+func (a *Agent) absorbLLM(data json.RawMessage) {
+	var res llmResult
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &res)
+	}
+	// 模型常常一边叙述一边调工具。叙述先落进意识流，**两种调用都这样**：
+	// 这条叙述是"她当时在想什么"的直接证据，丢了人格就只剩状态跳变。
+	if strings.TrimSpace(res.Text) != "" {
+		a.absorbNarration(res.Text)
+	}
+	switch res.Kind {
+	case thinkDecision:
+		a.applyDecision(res)
+	case thinkMonologue:
+		// 独白只写意识流，不改状态。已经由 absorbNarration 处理。
+		if strings.TrimSpace(res.Text) == "" {
+			a.appendStreamKind(KindObservation, "想了半天，没想出什么")
+		}
+	default:
+		a.log.Warn("llm_result_unknown_kind", slog.String("kind", string(res.Kind)))
+	}
+}
+
+// absorbNarration 把一段叙述解析成带类型的意识流记录。
 //
 // 解析在此进行而不是在 LLM 侧：类型是**状态机**的概念（它决定
 // 上下文怎么装配），LLM 只负责产出带前缀的文本。
-func (a *Agent) absorbMonologue(data json.RawMessage) {
-	var p struct {
-		Text string `json:"text"`
-	}
-	if len(data) > 0 {
-		_ = json.Unmarshal(data, &p)
-	}
-	entries := parseMonologue(p.Text)
+func (a *Agent) absorbNarration(text string) {
+	entries := parseMonologue(text)
 	if len(entries) == 0 {
-		a.appendStreamKind(KindObservation, "想了半天，没想出什么")
 		return
 	}
 	// 结果可能晚于状态切换才回来：回填发起时的状态，否则"在刷手机时

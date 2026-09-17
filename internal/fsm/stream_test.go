@@ -135,7 +135,7 @@ func TestParseMonologue(t *testing.T) {
 // 这是修复前后最关键的差别：意图过去不存在，换状态后 agent 就"忘了
 // 自己要干什么"。它是**日志里的一条记录**，因此不会被状态切换清掉。
 func TestIntentSurvivesStateChange(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	ctx := context.Background()
 
 	a.appendStreamKind(KindIntent, "待会把那段代码写完")
@@ -154,7 +154,7 @@ func TestIntentSurvivesStateChange(t *testing.T) {
 
 // TestIntentIsLatest 验证取的是**最近**一条意图，不是第一条。
 func TestIntentIsLatest(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	a.appendStreamKind(KindIntent, "先吃饭")
 	a.appendStreamKind(KindThought, "吃什么呢")
 	a.appendStreamKind(KindIntent, "还是先写代码")
@@ -164,7 +164,7 @@ func TestIntentIsLatest(t *testing.T) {
 	}
 
 	// 没有意图时返回空串，而不是报错或返回脏数据。
-	b := newTestAgent(t, 8, fakeChatter{})
+	b := newTestAgent(t, fakeChatter{})
 	if got := b.Intent(); got != "" {
 		t.Fatalf("无意图时 Intent = %q, 期望空", got)
 	}
@@ -174,7 +174,7 @@ func TestIntentIsLatest(t *testing.T) {
 //
 // R5 的落点：prompt 只读**有界的**子集，绝不塞全量意识流。
 func TestContextSections(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	a.appendStreamKind(KindObservation, "张三: 在吗")
 	a.appendStreamKind(KindThought, "有点困")
 	a.appendStreamKind(KindAction, "拿起手机刷一刷")
@@ -206,7 +206,7 @@ func TestContextSections(t *testing.T) {
 
 // TestContextRespectsLimits 验证每段都有上限（R5）。
 func TestContextRespectsLimits(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	for i := 0; i < 40; i++ {
 		a.appendStreamKind(KindThought, "想法"+string(rune('A'+i%26)))
 	}
@@ -225,7 +225,7 @@ func TestContextRespectsLimits(t *testing.T) {
 
 // TestContextDredgeIncluded 验证打捞结果进入 prompt（memory.md §5.1）。
 func TestContextDredgeIncluded(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	a.appendStreamKind(KindIntent, "把那段代码写完")
 
 	var asked []string
@@ -259,7 +259,7 @@ func TestContextDredgeIncluded(t *testing.T) {
 //
 // 上下文共享、追问各异——这正是"不是一个统一大 prompt"的落点。
 func TestContextDiffersBySite(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	sites := []CallSite{SiteMonologue, SiteDispatch, SiteToolRead}
 	seen := map[string]CallSite{}
 	for _, s := range sites {
@@ -275,10 +275,10 @@ func TestContextDiffersBySite(t *testing.T) {
 //
 // 这条是整条链路的验收：LLM 说了什么 → 解析 → 分类型 → 落进意识流。
 func TestMonologueWritesTypedEntries(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{reply: "想: 有点无聊\n打算: 去写点东西"})
+	a := newTestAgent(t, fakeChatter{reply: "想: 有点无聊\n打算: 去写点东西"})
 	before := len(a.Stream)
 
-	a.absorbMonologue(mustJSON(t, map[string]string{"text": "想: 有点无聊\n打算: 去写点东西"}))
+	a.absorbNarration("想: 有点无聊\n打算: 去写点东西")
 
 	added := a.Stream[before:]
 	if len(added) != 2 || added[0].Kind != KindThought || added[1].Kind != KindIntent {
@@ -301,14 +301,14 @@ func TestMonologueWritesTypedEntries(t *testing.T) {
 // 结果回来的时刻可能已经换过状态了。若按当前状态记，"刷手机时想的事"
 // 会显示成"干活时想的事"，意识流就失真了。
 func TestMonologueAttributedToOriginState(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{})
+	a := newTestAgent(t, fakeChatter{})
 	a.monologueOn = true
 	a.monologueEvery = -1 // 不节流
 	a.inFlightState = "scrolling_phone"
 
 	// 模拟结果回来前状态已经换了。
 	a.Current = "working"
-	a.absorbMonologue(mustJSON(t, map[string]string{"text": "想: 刷到一条有意思的"}))
+	a.absorbNarration("想: 刷到一条有意思的")
 
 	last := a.Stream[len(a.Stream)-1]
 	if last.State != "scrolling_phone" {
@@ -321,21 +321,21 @@ func TestMonologueAttributedToOriginState(t *testing.T) {
 // 断言用 IsThinking() 而不是统计调用次数：Chat 是在 goroutine 里跑的，
 // 计数会在测试读到它之后才增加，那样的断言是随机的。
 func TestMonologueThrottled(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{delay: time.Second, reply: "想: 嗯"})
+	a := newTestAgent(t, fakeChatter{delay: time.Second, reply: "想: 嗯"})
 	a.monologueOn = true
 	a.monologueEvery = 100
 
 	// 对齐到"刚发过一次独白"。
 	a.lastMonologueAt = a.Now
 	a.monologueSent = true
-	a.maybeThink()
+	a.monologue()
 	if a.IsThinking() {
 		t.Fatal("间隔内不应发起调用")
 	}
 
 	// 推过间隔后应放行。
 	a.Now += 101
-	a.maybeThink()
+	a.monologue()
 	if !a.IsThinking() {
 		t.Fatal("超过间隔后应发起调用")
 	}
@@ -346,8 +346,8 @@ func TestMonologueThrottled(t *testing.T) {
 
 // TestMonologueSkippedWhenDisabled 验证未开启独白时不发任何调用。
 func TestMonologueSkippedWhenDisabled(t *testing.T) {
-	a := newTestAgent(t, 7, fakeChatter{reply: "想: 嗯"})
-	a.maybeThink() // Monologue 未开启
+	a := newTestAgent(t, fakeChatter{reply: "想: 嗯"})
+	a.monologue() // Monologue 未开启
 	if a.IsThinking() {
 		t.Fatal("未开启独白时不应发起调用")
 	}
@@ -360,7 +360,7 @@ func TestMonologueSkippedWhenDisabled(t *testing.T) {
 func TestMessageIngested(t *testing.T) {
 	sink := &recordingSink{}
 	a := newTestAgentWith(t, Options{
-		Name: "test", States: MVPStates(), Seed: 7, Initial: "working",
+		Name: "test", States: MVPStates(), Initial: "working",
 		Chatter: fakeChatter{}, Sink: sink,
 	})
 	ctx := context.Background()
@@ -390,7 +390,7 @@ func TestMessageIngested(t *testing.T) {
 // TestMessageMarksMention 验证被 @ 时意识流留下提示（但不含正文）。
 func TestMessageMarksMention(t *testing.T) {
 	a := newTestAgentWith(t, Options{
-		Name: "test", States: MVPStates(), Seed: 7, Initial: "working",
+		Name: "test", States: MVPStates(), Initial: "working",
 		Chatter: fakeChatter{}, Sink: &recordingSink{},
 	})
 	a.handleEvent(context.Background(), NewMessageEvent(IncomingMessage{
@@ -417,12 +417,12 @@ func TestMessageMarksMention(t *testing.T) {
 func TestLLMFailureLoggedWithCause(t *testing.T) {
 	var buf strings.Builder
 	a := newTestAgentWith(t, Options{
-		Name: "test", States: MVPStates(), Seed: 7, Initial: "idle",
+		Name: "test", States: MVPStates(), Initial: "idle",
 		Chatter: fakeChatter{},
 		Logger:  slog.New(slog.NewTextHandler(&buf, nil)),
 	})
 
-	a.absorbMonologue(nil) // 空负载：不该 panic
+	a.absorbLLM(nil) // 空负载：不该 panic
 	a.handleEvent(context.Background(), Event{
 		Kind: EventLLMFailed,
 		Data: mustJSON(t, map[string]string{"error": "KeyError: 'unified-model'"}),
@@ -447,7 +447,7 @@ func TestLLMFailureLoggedWithCause(t *testing.T) {
 // 标识写进去，模型会看到自己不该看见的东西，人格叙事也脏了。
 func TestStreamTextHasNoInternalIdentifiers(t *testing.T) {
 	a := newTestAgentWith(t, Options{
-		Name: "test", States: MVPStates(), Seed: 7, Initial: "sleeping",
+		Name: "test", States: MVPStates(), Initial: "sleeping",
 		Chatter: fakeChatter{}, Sink: &recordingSink{},
 	})
 	a.handleEvent(context.Background(), NewMessageEvent(IncomingMessage{

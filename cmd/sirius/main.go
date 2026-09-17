@@ -67,7 +67,6 @@ func run() error {
 	agent, err := fsm.New(fsm.Options{
 		Name:      "sirius",
 		States:    fsm.MVPStates(),
-		Seed:      opt.Seed,
 		StartTick: opt.StartTick,
 		Chatter:   chatter,
 		Logger:    logger,
@@ -77,7 +76,7 @@ func run() error {
 		// 外部消息的落点：没有它，unread 队列与待选区永远是空的
 		// （记忆链路整条失效）。
 		Sink: store,
-		// 意识流由 LLM 生成，而不是写死的旁白。异步、可被抢占（R4）。
+		// 意识流由 LLM 生成，而不是写死的旁白。异步、可取消（R4）。
 		// 间隔可调：它是唯一的 LLM 成本闸门（SIRIUS_MONOLOGUE_EVERY）。
 		Monologue:      true,
 		MonologueEvery: opt.MonologueEvery,

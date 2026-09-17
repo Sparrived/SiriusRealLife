@@ -248,7 +248,7 @@ func TestStaticAndProxyCoexist(t *testing.T) {
 
 	b := NewBroadcaster()
 	agent, err := fsm.New(fsm.Options{
-		Name: "t", States: fsm.MVPStates(), Seed: 1,
+		Name: "t", States: fsm.MVPStates(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {

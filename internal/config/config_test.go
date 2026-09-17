@@ -12,7 +12,6 @@ import (
 func TestFromEnvDefaults(t *testing.T) {
 	t.Setenv("SIRIUS_ADDR", "")
 	t.Setenv("SIRIUS_TICK_INTERVAL", "")
-	t.Setenv("SIRIUS_SEED", "")
 	t.Setenv("SIRIUS_START_TICK", "")
 	t.Setenv("SIRIUS_MONOLOGUE_EVERY", "")
 
@@ -26,9 +25,6 @@ func TestFromEnvDefaults(t *testing.T) {
 	// 默认从白天开始：一上来是半夜会让人格表现怪异。
 	if fsm.Hour(opt.StartTick) < 6 || fsm.Hour(opt.StartTick) > 22 {
 		t.Errorf("默认起始时刻 %d 点不是白天", fsm.Hour(opt.StartTick))
-	}
-	if opt.Seed == 0 {
-		t.Error("应当有默认种子")
 	}
 	// 独白间隔是成本闸门，必须有非零默认值：0 会被 fsm 当作
 	// "用默认值"，但显式配置成 0 意味着不节流（每次进入都调 LLM）。
@@ -128,7 +124,6 @@ func TestRejectsBadValues(t *testing.T) {
 		{"SIRIUS_TICK_INTERVAL", "abc"},
 		{"SIRIUS_TICK_INTERVAL", "0s"},
 		{"SIRIUS_TICK_INTERVAL", "-1s"},
-		{"SIRIUS_SEED", "not-a-number"},
 		{"SIRIUS_START_TICK", "x"},
 		{"SIRIUS_ALLOW_OPS", "maybe"},
 		{"SIRIUS_MONOLOGUE_EVERY", "abc"},

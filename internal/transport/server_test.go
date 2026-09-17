@@ -17,7 +17,7 @@ func newTestServer(t *testing.T) (*Server, *Broadcaster) {
 	t.Helper()
 	b := NewBroadcaster()
 	a, err := fsm.New(fsm.Options{
-		Name: "t", States: fsm.MVPStates(), Seed: 1, Initial: "idle",
+		Name: "t", States: fsm.MVPStates(), Initial: "idle",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {

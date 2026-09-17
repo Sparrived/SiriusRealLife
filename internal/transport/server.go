@@ -175,17 +175,21 @@ type streamEntry struct {
 }
 
 type dispatchEntry struct {
-	From   string           `json:"from"`
-	To     string           `json:"to"`
-	Reason string           `json:"reason"`
-	Roll   float64          `json:"roll"`
-	Total  float64          `json:"total"`
-	Cands  []candidateEntry `json:"candidates"`
+	From     string           `json:"from"`
+	To       string           `json:"to"`
+	Reason   string           `json:"reason"`
+	Why      string           `json:"why"`
+	ForTicks int64            `json:"for_ticks"`
+	Cands    []candidateEntry `json:"candidates"`
 }
 
 type candidateEntry struct {
-	Name   string  `json:"name"`
-	Weight float64 `json:"weight"`
+	Name string `json:"name"`
+	// Blocked 为空表示它是候选；非空是它没进候选的原因。
+	//
+	// 前端据此把"没被选中"和"根本不能选"分开显示——这个区别是
+	// 排障时最常问的问题（"为什么她从来不去睡觉？"）。
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // toResponse 把内部快照转成 API 形状。
@@ -210,10 +214,10 @@ func (s *Server) toResponse(snap fsm.Snapshot) stateResponse {
 	if snap.Last.To != "" {
 		d := dispatchEntry{
 			From: string(snap.Last.From), To: string(snap.Last.To),
-			Reason: snap.Last.Reason, Roll: snap.Last.Roll, Total: snap.Last.Total,
+			Reason: snap.Last.Reason, Why: snap.Last.Why, ForTicks: int64(snap.Last.ForTicks),
 		}
 		for _, c := range snap.Last.Candidates {
-			d.Cands = append(d.Cands, candidateEntry{Name: string(c.Name), Weight: c.Weight})
+			d.Cands = append(d.Cands, candidateEntry{Name: string(c.Name), Blocked: c.Blocked})
 		}
 		out.Last = &d
 	}

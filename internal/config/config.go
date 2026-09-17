@@ -20,7 +20,6 @@ import (
 type Options struct {
 	Addr         string
 	TickInterval time.Duration
-	Seed         int64
 	StartTick    fsm.Tick
 	StaticDir    string
 	AllowOps     bool
@@ -46,7 +45,6 @@ func FromEnv() (Options, error) {
 		Addr:         envOr("SIRIUS_ADDR", "127.0.0.1:8080"),
 		StaticDir:    envOr("SIRIUS_STATIC_DIR", "web/dist"),
 		TickInterval: time.Second,
-		Seed:         20240101,
 		StartTick:    7 * 60, // 默认从游戏内 07:00 开始，别一上来就是半夜
 	}
 
@@ -59,13 +57,6 @@ func FromEnv() (Options, error) {
 			return Options{}, fmt.Errorf("config: SIRIUS_TICK_INTERVAL 必须为正，得到 %s", d)
 		}
 		opt.TickInterval = d
-	}
-	if v := strings.TrimSpace(os.Getenv("SIRIUS_SEED")); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return Options{}, fmt.Errorf("config: SIRIUS_SEED 不是整数 %q: %w", v, err)
-		}
-		opt.Seed = n
 	}
 	if v := strings.TrimSpace(os.Getenv("SIRIUS_START_TICK")); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
