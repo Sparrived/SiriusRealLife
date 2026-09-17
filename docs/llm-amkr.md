@@ -64,6 +64,37 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 > 只在**确实需要按字段分类型**时才用。普通调用点（如工具结果解读）要的是一句话，加 schema 只会让模型把答案塞进它猜的字段里。
 
+### 工具调用
+
+状态决定走 `tools`（OpenAI function calling 形状），不是 `response_format`：
+
+```jsonc
+{
+  "model": "TASK_XXXXXX",
+  "messages": [{"role": "user", "content": "…"}],
+  "tools": [
+    { "type": "function", "function": {
+        "name": "enter_state",
+        "description": "换一个状态。可选：刷手机、发呆、工作",
+        "parameters": { "type": "object",
+          "properties": { "state": { "type": "string", "enum": ["scrolling_phone","idle","working"] }, … },
+          "required": ["state","for_ticks","why"], "additionalProperties": false } } }
+  ]
+}
+```
+
+回复读 `message.tool_calls[]`，其中 `function.arguments` 是**字符串**（不是对象），要二次 `json.Unmarshal`。有些上游对无参调用回空串，按 `{}` 处理。
+
+**同样按"尽力而为"处理，而且更危险**：
+
+- **实测 wb2api 会静默忽略 `tools`**（连 `response_format` 一起忽略），照旧返回 `200` + 散文。因此 `applyDecision` 必须有"一个可识别的调用都没有"的分支，降级为 `stay`
+- 因此**不能**把安全/一致性建立在"模型一定调了工具"之上：候选清单进 `enum` 是**第一道**约束，`commitEnter` 里的 `inMenu` 复核是**第二道**，缺一不可
+- 候选状态名放进 `enum`，被挡掉的状态连原因写进 `description`——模型看到"睡觉：此刻不满足进入条件"比看不到它更好，后者会让它反复尝试一个不可能的选项
+- 工具**每次调用显式给出**，不做全局注册表：可见性随状态变化，全局注册表只能表达"所有调用看到同一套"
+- 声明 `additionalProperties: false` 与 `required`。这和 `strict` 一样是**请求**，不是保证
+- 一次回复可能同时带 `content` 与 `tool_calls`（模型边叙述边动手）。两者都要留：叙述进意识流，调用改世界
+- 一次回复可能带**多个**调用：只执行**第一个**被识别的。合并执行会让"最后到底进了哪个状态"取决于遍历顺序
+
 ## 3. 超时、重试、流式
 
 - **Sirius 不重试 LLM 调用。** AMKR 已负责重试、切换 Key、冷却异常 Key。客户端重试 = 双倍计费 + 日志噪音
@@ -79,7 +110,7 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
   客户端先超时会把 AMKR 正在重试的请求提前掐死，白花钱。
 
 - 流式调用一律带 `stream_options.include_usage=true`（AMKR 会强制补上），解析时按"usage 可能存在"处理，**不假设它一定在最后一个 chunk**
-- 所有调用必须接受可取消的 `context`：状态被抢占时取消在途调用，别让它跑完 30 秒再丢弃（对应 R4）
+- 所有调用必须接受可取消的 `context`：关停时取消在途调用，别让它跑完 30 秒再丢弃（对应 R4）。抢占已取消，因此**关停是唯一的取消来源**
 - AMKR 可能把请求切到任意一个配了同一个模型的 Key，**响应头、字节序、错误格式都按 OpenAI 标准处理，不要依赖某个上游的私有行为**
 
 ## 4. 内嵌 AMKR WebUI
