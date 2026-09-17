@@ -96,6 +96,10 @@ services:
       SIRIUS_SEED: ${SIRIUS_SEED:-20240101}
       SIRIUS_START_TICK: ${SIRIUS_START_TICK:-420}
       SIRIUS_LOG_LEVEL: ${SIRIUS_LOG_LEVEL:-info}
+      # 内心独白的最小间隔（tick）。这是唯一的 LLM 成本闸门：
+      # 独白由状态进入触发，而状态平均只停留几 tick，不节流等于每次
+      # 状态转移都发一次调用。默认 30（游戏内半小时）。
+      SIRIUS_MONOLOGUE_EVERY: ${SIRIUS_MONOLOGUE_EVERY:-30}
       TZ: Asia/Shanghai
     ports:
       # ⚠️ 只绑宿主回环。写成 "8080:8080" 会把 /amkr/（AMKR 完整管理权限）
