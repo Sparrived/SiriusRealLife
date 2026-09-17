@@ -26,7 +26,7 @@ func NewChatter(client *Client, site CallSite) *Chatter {
 
 // Chat 实现 fsm.Chatter。
 func (c *Chatter) Chat(ctx context.Context, req fsm.ChatRequest) (fsm.ChatResponse, error) {
-	text, err := c.client.Complete(ctx, req.Prompt)
+	text, err := c.client.Complete(ctx, req)
 	if err != nil {
 		// 503：当作可降级错误处理，不立刻重试。
 		if se, ok := err.(*StatusError); ok && se.Unavailable() && c.OnDegrade != nil {

@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/Sparrived/SiriusRealLife/internal/fsm"
 )
 
 // TestSmokeAgainstRealAMKR 打真实 AMKR，验证契约没写错。
@@ -38,7 +40,7 @@ func TestSmokeAgainstRealAMKR(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	text, err := c.Complete(ctx, "只回复两个字：收到")
+	text, err := c.Complete(ctx, fsm.ChatRequest{Prompt: "只回复两个字：收到"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Complete 失败: %v", err)

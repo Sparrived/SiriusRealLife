@@ -61,7 +61,7 @@ func TestCompleteSendsForbiddenFreeParams(t *testing.T) {
 		okResponse("收到")(w, r)
 	})
 
-	if _, err := c.Complete(context.Background(), "你好"); err != nil {
+	if _, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "你好"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	<-done
@@ -87,12 +87,85 @@ func TestCompleteSendsForbiddenFreeParams(t *testing.T) {
 // TestCompleteParsesContent 验证正常响应能取出文本。
 func TestCompleteParsesContent(t *testing.T) {
 	c, _ := newTestClient(t, okResponse("我在刷手机"))
-	text, err := c.Complete(context.Background(), "你在做什么")
+	text, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "你在做什么"})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if text != "我在刷手机" {
 		t.Fatalf("text = %q", text)
+	}
+}
+
+// TestResponseFormatOnlyWhenSchemaRequested 验证 response_format 的收发边界。
+//
+// 不请求 schema 时**不能**出现这个字段：AMKR 有些任务对多余参数敏感，
+// 而空壳 schema 会让一条普通调用变成结构化调用。
+func TestResponseFormatOnlyWhenSchemaRequested(t *testing.T) {
+	cases := []struct {
+		name  string
+		req   fsm.ChatRequest
+		want  bool
+		check func(*testing.T, map[string]any)
+	}{
+		{
+			name: "未请求 schema",
+			req:  fsm.ChatRequest{Prompt: "x"},
+			want: false,
+		},
+		{
+			name: "请求 schema",
+			req: fsm.ChatRequest{Prompt: "x", Schema: &fsm.ResponseSchema{
+				Name:   "monologue",
+				Schema: json.RawMessage(`{"type":"object","properties":{"thought":{"type":"string"}}}`),
+			}},
+			want: true,
+			check: func(t *testing.T, got map[string]any) {
+				rf, _ := got["response_format"].(map[string]any)
+				if rf["type"] != "json_schema" {
+					t.Errorf("type = %v, 期望 json_schema（只有 strict 才约束字段名）", rf["type"])
+				}
+				js, _ := rf["json_schema"].(map[string]any)
+				if js["name"] != "monologue" {
+					t.Errorf("name = %v", js["name"])
+				}
+				if js["strict"] != true {
+					t.Errorf("strict = %v, 期望 true", js["strict"])
+				}
+				if _, ok := js["schema"].(map[string]any); !ok {
+					t.Errorf("schema 未原样传出: %v", js["schema"])
+				}
+			},
+		},
+		{
+			name: "schema 为空视为未请求",
+			req:  fsm.ChatRequest{Prompt: "x", Schema: &fsm.ResponseSchema{Name: "empty"}},
+			want: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got map[string]any
+			done := make(chan struct{})
+			client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &got)
+				close(done)
+				okResponse("{}")(w, r)
+			})
+			if _, err := client.Complete(context.Background(), c.req); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			<-done
+
+			rf, present := got["response_format"]
+			if present != c.want {
+				t.Fatalf("response_format 出现 = %v, 期望 %v（值 %v）", present, c.want, rf)
+			}
+			if c.want && c.check != nil {
+				c.check(t, got)
+			}
+		})
 	}
 }
 
@@ -105,7 +178,7 @@ func TestCompleteSendsAuthHeader(t *testing.T) {
 		close(done)
 		okResponse("ok")(w, r)
 	})
-	if _, err := c.Complete(context.Background(), "x"); err != nil {
+	if _, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	<-done
@@ -123,7 +196,7 @@ func TestUnavailableIsDegradable(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"no usable key"}`))
 	})
 
-	_, err := c.Complete(context.Background(), "x")
+	_, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"})
 	if err == nil {
 		t.Fatal("503 应当返回错误")
 	}
@@ -146,7 +219,7 @@ func TestServerErrorNotRetried(t *testing.T) {
 		calls++
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	if _, err := c.Complete(context.Background(), "x"); err == nil {
+	if _, err := c.Complete(context.Background(), fsm.ChatRequest{Prompt: "x"}); err == nil {
 		t.Fatal("502 应当返回错误")
 	}
 	if calls != 1 {
@@ -169,7 +242,7 @@ func TestContextCancelPropagates(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := c.Complete(ctx, "x")
+	_, err := c.Complete(ctx, fsm.ChatRequest{Prompt: "x"})
 	if err == nil {
 		t.Fatal("取消后应返回错误")
 	}
