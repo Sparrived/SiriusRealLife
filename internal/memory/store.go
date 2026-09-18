@@ -141,6 +141,22 @@ type Store struct {
 	// browseCursor 是翻阅位置，独立于已读游标（§2.3 的两级读取）。
 	browseCursor MessageID
 
+	// now 是最近一次 Tick 传入的 tick 序号。
+	//
+	// 为什么存一份而不是从消息上取：会话分组要的是"她此刻在什么时候
+	// 看到这批消息"，而消息自带的 Tick 可能没被上游填（离线推演、
+	// 测试直接 Ingest 都是 0）。用 0 分组会让所有消息挤进同一个会话，
+	// 打捞于是永远返回一整坨，§5.1 的"以一次翻阅为单位"就失效了。
+	// R8：这里存的就是 tick，不认 wall clock。
+	now fsm.Tick
+
+	// lastSession / lastSessionAt 让时间上连续的几次读取归入**同一次翻阅**。
+	//
+	// 没有它，Pump 每 tick 捞到一条就开一个新会话，于是"整段上下文"
+	// 每段只有一句话——§5.1 想避免的正是这个（单条脱离上下文会失去含义）。
+	lastSession   SessionID
+	lastSessionAt fsm.Tick
+
 	// staging 是待选区（§3）。
 	staging []*Entry
 	// events 是升格后的事件记忆。
@@ -353,10 +369,16 @@ func (s *Store) browseMessages(n int) []Message {
 	return picked
 }
 
-// WriteStaging 把一次翻阅的内容写入待选区，返回新条目。
+// WriteStaging 直接写入一条待选区条目，返回新条目。
 //
-// keywords 与 importance 由 LLM 在同一次调用里产出（§5.3）：
-// 关键词用于打捞，importance 用于升格对冲。
+// 生产路径走 rememberSeen（"看到的都写"），本方法是**显式写入**的
+// 接缝：测试用它摆出任意待选区状态；将来的工具层（send_message 之类
+// 需要记下"我说了什么"）也用它。keywords 会被切成词元，与查询侧
+// 走同一条 tokenize，否则又会出现"两侧各写各的、合起来不命中"。
+//
+// now 为 0 表示"用存储当前的 tick"：显式写入的调用方常常没有 tick
+// 可给，而**不能**让 0 覆盖掉存储时钟——那会把后续 Scan 的会话分组
+// 全部拽回 tick 0，同一批翻阅被误判成"隔了很久"。
 func (s *Store) WriteStaging(session SessionID, text string, keywords []string, importance int, now fsm.Tick) *Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -365,6 +387,15 @@ func (s *Store) WriteStaging(session SessionID, text string, keywords []string, 
 		s.nextSessID++
 		session = s.nextSessID
 	}
+	at := now
+	if at == 0 {
+		at = s.now
+	}
+	return s.appendEntryLocked(session, text, keywords, importance, at)
+}
+
+// appendEntryLocked 是待选区唯一的追加点（调用方须持锁）。
+func (s *Store) appendEntryLocked(session SessionID, text string, keywords []string, importance int, at fsm.Tick) *Entry {
 	if importance < 1 {
 		importance = 1
 	}
@@ -376,10 +407,10 @@ func (s *Store) WriteStaging(session SessionID, text string, keywords []string, 
 		ID:         s.nextEntryID,
 		Session:    session,
 		Text:       text,
-		Keywords:   normalizeKeywords(keywords),
+		Keywords:   tokensOf(keywords),
 		Importance: importance,
 		Strength:   1.0,
-		Created:    now,
+		Created:    at,
 	}
 	s.staging = append(s.staging, e)
 	return e
@@ -393,40 +424,135 @@ func (s *Store) NewSession() SessionID {
 	return s.nextSessID
 }
 
-// normalizeKeywords 去空、去重、转小写，保证匹配行为可预期。
-func normalizeKeywords(in []string) []string {
-	seen := map[string]bool{}
+// rememberSeen 把"刚看到的一批消息"写入待选区（§3 的入口）。
+//
+// 这是整条记忆链路唯一的写入方。没有它，staging 恒为空，于是
+// 打捞永远捞不到东西、升格永不触发、Shadow 永不增长——四层记忆
+// 全部有实现有测试，却在真实运行中一层都不动。
+//
+// 两个设计决定：
+//
+//  1. **会话按时间邻近合并。** 同一次"看手机"里陆续扫到的几条消息
+//     属于同一次翻阅，而不是各成一段。§5.1 要的检索单位是"那天翻到的
+//     那一段"：Pump 每 tick 捞到一条就开新会话的话，每段只有一句话，
+//     恰好退化成它想避免的"孤立单条"。
+//  2. **关键词由本地词元化产出**，不调 LLM。用户明确"看手机时看到的
+//     都写"，写入是自动的，因此不能挂在一次工具调用上；而 §5.1 原写
+//     "存储时由 LLM 生成关键词"需要额外一次调用，与"写入自动"冲突。
+//     ponytail: 本地 2/3-gram 的召回不如 LLM 生成的关键词准（同义词、
+//     代词仍然匹配不上）。升级路径就是 §5.1 写的查询扩展——真要接
+//     时，让独白顺带产出关键词即可（独白本来就在回看刚发生的事），
+//     不必新增调用点。
+func (s *Store) rememberSeen(msgs []Message) {
+	if len(msgs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session := s.sessionForLocked()
+
+	for _, m := range msgs {
+		// 关键词基于 messageBody：不含"（提到了你）"这类给模型看的标记。
+		s.appendEntryLocked(session, formatMessage(m), []string{messageBody(m)}, m.Importance, s.now)
+	}
+}
+
+// sessionForLocked 返回本批写入应当归属的会话 ID。
+//
+// 与上一批写入在 sessionGap 内则复用，否则新开一次翻阅。
+func (s *Store) sessionForLocked() SessionID {
+	if s.lastSession != 0 && s.now-s.lastSessionAt <= sessionGap {
+		s.lastSessionAt = s.now
+		return s.lastSession
+	}
+	s.nextSessID++
+	s.lastSession = s.nextSessID
+	s.lastSessionAt = s.now
+	return s.lastSession
+}
+
+// sessionGap 是"同一次翻阅"的最大 tick 间隔。
+//
+// 30 tick = 半小时游戏时间。取值的理由：一次刷手机通常连着看几条，
+// 而两次独立的"看手机"之间会隔着别的状态（干活、发呆），远不止半小时。
+// 太小会把一次翻阅切碎，太大则把隔了很久的两段揉成一段。
+const sessionGap fsm.Tick = 30
+
+// tokensOf 把一组文本（查询词、关键词）统一切成词元并去重。
+//
+// **写入侧与查询侧必须走同一个函数**，这是打捞能成立的不变式。
+// 之前两侧各有一套：写入存整词（"关键词"），查询也传整句
+// （"翻翻昨天聊过的记录打发时间"），于是 matchesAny 拿整句去
+// strings.Contains，永远为假——线上【想起的事】恒空，而代码路径
+// 看着是通的（Dredge 有生产调用方、有单测覆盖）。
+// 单测没发现是因为测试两边都传同一个词，恰好能对上。
+func tokensOf(in []string) []string {
 	var out []string
-	for _, k := range in {
-		k = strings.ToLower(strings.TrimSpace(k))
-		if k == "" || seen[k] {
-			continue
+	seen := map[string]bool{}
+	for _, s := range in {
+		for _, t := range tokenize(s) {
+			if seen[t] {
+				continue
+			}
+			if len(out) >= maxTokens {
+				return out
+			}
+			seen[t] = true
+			out = append(out, t)
 		}
-		seen[k] = true
-		out = append(out, k)
 	}
 	return out
 }
 
-// Dredge 按关键词打捞，返回命中的**整段**内容（§5.1），并刷新其记忆曲线。
+// Dredge 按查询打捞，返回命中的**整段**内容（§5.1），并刷新其记忆曲线。
 //
-// query 已是调用方（LLM 查询扩展后）展开的关键词集合：本方法不做
-// 同义词扩展，只做匹配——扩展是 LLM 的活（§5.1 的补偿手段）。
+// query **可以是自然语言**（调用方给的就是意图原句、想法原句），本方法
+// 自己切词元。此前这里假设"调用方已展开成关键词集合"，但调用方
+// （fsm.dredgeQuery）给的是整句，而整句做子串匹配恒不命中——契约两侧
+// 各写各的，谁都没错，合起来就是线上打捞永远为空。
+// 现在契约收在这里：**给自然语言，我负责切**。
+//
+// 不做同义词扩展——那是 LLM 的活（§5.1 的查询扩展），本方法只做匹配。
 //
 // 返回的是去重后的会话文本列表：以"一次翻阅"为检索单位。
 func (s *Store) Dredge(query []string, now fsm.Tick) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	want := normalizeKeywords(query)
+	want := tokensOf(query)
 	if len(want) == 0 {
 		return nil
+	}
+
+	// 词元的文档频率：它出现在待选区多少条里。
+	//
+	// 这是精度控制的关键，不是优化。打捞有**副作用**（刷新强度、
+	// 累计升格次数），所以"什么都捞"不只是 prompt 变吵，还会把无关
+	// 内容一路顶成事件记忆，记忆层就废了。反过来，只按固定个数
+	// 卡阈值也不行：短条目（"周末去看展吗"）与整句查询通常只共享
+	// 一个词，那恰恰是最该命中的情况。
+	//
+	// 规则：**只在这一条里出现过的词元，一个就够；越常见越需要互相印证。**
+	df := make(map[string]int, len(want))
+	for _, w := range want {
+		for _, e := range s.staging {
+			if entryMatches(e, w) {
+				df[w]++
+			}
+		}
+	}
+
+	// 查询本身词元就少时无法互相印证，只能降为"有一个算一个"。
+	need := minGramHits
+	if len(want) < need {
+		need = len(want)
 	}
 
 	// 先找出命中的会话。
 	hitSessions := map[SessionID]bool{}
 	for _, e := range s.staging {
-		if matchesAny(e.Keywords, e.Text, want) {
+		if entryHits(e, want, df, need) {
 			e.Strength = 1.0 // 打捞刷新记忆曲线（§4）
 			e.LastDredged = now
 			e.DredgeTicks = append(e.DredgeTicks, now)
@@ -465,23 +591,40 @@ func (s *Store) Dredge(query []string, now fsm.Tick) []string {
 	return out
 }
 
-// matchesAny 做朴素子串匹配。
+// entryMatches 判断一条待选区条目是否含某个词元。
 //
-// ponytail: 子串匹配，天花板是同义词/代词匹配不上；升级路径是
-// Phase 2 的向量召回（§5.2），关键词那一路保留作精确命中。
-func matchesAny(keywords []string, text string, want []string) bool {
-	lowText := strings.ToLower(text)
-	for _, w := range want {
-		for _, k := range keywords {
-			if k == w {
-				return true
-			}
-		}
-		if strings.Contains(lowText, w) {
+// 同时比对写入时算好的 Keywords 与正文：Keywords 是精确集合命中，
+// 正文兜住"关键词没覆盖到但字面确实出现"的情况。
+func entryMatches(e *Entry, w string) bool {
+	for _, k := range e.Keywords {
+		if k == w {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(strings.ToLower(e.Text), w)
+}
+
+// entryHits 判断一条条目是否算命中查询。
+//
+// 规则：把条目命中的词元按"稀有度"排序，稀有的一个就够，
+// 常见词需要凑够 need 个不同的词元互相印证。
+//
+// 例：查询"翻翻昨天聊过的看展的事打发时间"，条目"周末去看展吗"只共享
+// "看展"——但"看展"在整个待选区里只出现这一次，于是单凭它就命中。
+// 若待选区里十条都在聊看展，"看展"就不稀奇了，得再有别的词元佐证。
+func entryHits(e *Entry, want []string, df map[string]int, need int) bool {
+	hits := 0
+	rare := false
+	for _, w := range want {
+		if !entryMatches(e, w) {
+			continue
+		}
+		hits++
+		if df[w] <= 1 {
+			rare = true
+		}
+	}
+	return rare || hits >= need
 }
 
 // Tick 推进记忆曲线并做升格/遗忘（§4、§5.3）。
@@ -490,6 +633,9 @@ func matchesAny(keywords []string, text string, want []string) bool {
 func (s *Store) Tick(now fsm.Tick) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 记住当前 tick：rememberSeen 用它给会话分组、给条目打 Created。
+	// 这是本包唯一的"时钟"，只在 Tick 里前进（R8）。
+	s.now = now
 	s.decayLocked(now)
 	s.promoteLocked(now)
 }
@@ -572,6 +718,54 @@ func (s *Store) ShadowLen() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.shadow)
+}
+
+// Counts 汇总各层条数，供观测。
+//
+// 存在的理由很具体：这条链路曾经"看着是通的、实际一条都没写"，
+// 而且四层全有实现、全有单测。光看代码与测试都发现不了，
+// 必须在真实运行中能一眼看出 staging 是不是 0。
+type Counts struct {
+	Messages int
+	Staging  int
+	Events   int
+	Shadow   int
+	Dropped  int
+}
+
+// Counts 返回各层条数。
+func (s *Store) Counts() Counts {
+	return Counts{
+		Messages: s.MessagesLen(),
+		Staging:  s.StagingLen(),
+		Events:   s.EventsLen(),
+		Shadow:   s.ShadowLen(),
+		Dropped:  s.Dropped(),
+	}
+}
+
+// MessagesLen 返回 unread 队列条数（含已读，见 §2.2）。
+func (s *Store) MessagesLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.messages)
+}
+
+// StagingLen 返回待选区条数。
+//
+// 与 ShadowLen 一样是**基本类型返回**，好让别的包用结构化接口接上
+// （transport 只想知道"是不是 0"，不该为此 import 本包）。
+func (s *Store) StagingLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.staging)
+}
+
+// EventsLen 返回事件记忆条数。
+func (s *Store) EventsLen() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.events)
 }
 
 // ShadowAudit 是**给人看的**审计接口（§3.1）。

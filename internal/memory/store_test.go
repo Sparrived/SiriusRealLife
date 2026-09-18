@@ -372,3 +372,157 @@ func TestImportanceClamped(t *testing.T) {
 		t.Errorf("importance = %d, 期望夹到 10", hi.Importance)
 	}
 }
+
+// TestScanWritesStaging 验证"看手机时看到的都写"：Scan 有副作用，
+// 把看到的消息写入待选区。
+//
+// 这条是整条记忆链路的**存在性测试**。没有它，staging 恒为空，
+// 于是打捞、升格、Shadow 三层在真实运行中永不发生——而它们各自
+// 都有单测、都能通过。测试写的是"看手机"这个真实入口（Scan 是
+// Pump 与 ReadPhone 的共同收口），不是 WriteStaging。
+func TestScanWritesStaging(t *testing.T) {
+	s := newStore()
+	s.Tick(100)
+
+	for i := 0; i < 3; i++ {
+		s.Ingest(Message{From: "张三", Text: fmt.Sprintf("第 %d 条", i)})
+	}
+	if got := len(s.Staging()); got != 0 {
+		t.Fatalf("还没看手机，待选区应为空，实际 %d 条", got)
+	}
+
+	s.Scan(5)
+	got := s.Staging()
+	if len(got) != 3 {
+		t.Fatalf("看到 3 条消息应写入 3 条待选区条目，实际 %d", len(got))
+	}
+	// 记的是"她看到什么"：带发送者，便于日后回忆"谁说过"。
+	if !strings.Contains(got[0].Text, "张三") || !strings.Contains(got[0].Text, "第 0 条") {
+		t.Errorf("待选区正文应含发送者与内容，实际 %q", got[0].Text)
+	}
+	// Created 用存储时钟，不是消息自带的 Tick（可能没人填）。
+	if got[0].Created != 100 {
+		t.Errorf("Created = %d, 期望存储当前 tick 100", got[0].Created)
+	}
+	// 初始强度满值，此后才开始衰减（§4）。
+	if got[0].Strength != 1.0 {
+		t.Errorf("初始强度 = %v, 期望 1.0", got[0].Strength)
+	}
+}
+
+// TestBrowseWritesStaging 验证翻旧账看到的同样写入待选区。
+func TestBrowseWritesStaging(t *testing.T) {
+	s := newStore()
+	for i := 0; i < 6; i++ {
+		s.Ingest(Message{Text: fmt.Sprintf("旧账 %d", i)})
+	}
+	s.Scan(6) // 先全部看过，游标走到头
+	before := len(s.Staging())
+
+	s.Browse(3)
+	if got := len(s.Staging()) - before; got != 3 {
+		t.Fatalf("翻 3 条旧账应新增 3 条待选区条目，实际 %d", got)
+	}
+}
+
+// TestScanGroupsOneBrowsingSession 验证会话分组：同一次"看手机"里
+// 陆续看到的几条属于同一次翻阅，而不是各成一段。
+//
+// 为什么要紧：打捞的检索单位是"一次翻阅"（§5.1），返回整段上下文。
+// 若 Pump 每 tick 捞到一条就开一个新会话，每段只剩一句话，
+// 恰好退化成 §5.1 想避免的"孤立单条"（"那你去吧"指什么？）。
+func TestScanGroupsOneBrowsingSession(t *testing.T) {
+	s := newStore()
+	s.Tick(10)
+	s.Ingest(Message{Text: "周末去看展吗"})
+	s.Scan(1)
+
+	// 隔几 tick 又来一条——仍算同一次翻阅（间隔远小于 sessionGap）。
+	s.Tick(12)
+	s.Ingest(Message{Text: "那你去吧"})
+	s.Scan(1)
+
+	got := s.Staging()
+	if len(got) != 2 {
+		t.Fatalf("应有 2 条待选区条目，实际 %d", len(got))
+	}
+	if got[0].Session != got[1].Session {
+		t.Errorf("相隔 2 tick 的两条应属同一次翻阅，会话 %d != %d",
+			got[0].Session, got[1].Session)
+	}
+	// 整段返回两条：这才是"翻阅"的粒度。
+	seg := s.Dredge([]string{"看展"}, 20)
+	if len(seg) != 1 || !strings.Contains(seg[0], "那你去吧") {
+		t.Fatalf("打捞应返回含上下文的整段，得到 %v", seg)
+	}
+
+	// 隔很久之后再看手机，是新的一次翻阅。
+	s.Tick(fsm.Tick(12) + sessionGap + 1)
+	s.Ingest(Message{Text: "另一天的事"})
+	s.Scan(1)
+	all := s.Staging()
+	if all[len(all)-1].Session == got[0].Session {
+		t.Error("隔了 sessionGap 以上应算新的一次翻阅")
+	}
+}
+
+// TestDredgeMatchesNaturalLanguageQuery 是这条链路最关键的回归测试。
+//
+// 调用方（fsm.dredgeQuery）给的是**整句**意图与想法，不是关键词。
+// 旧实现的契约写的是"调用方已展开成关键词集合"，于是拿整句去
+// strings.Contains，永远为假：线上【想起的事】恒不出现，而 Dredge
+// 有生产调用方、有单测覆盖、看着完全正常。
+//
+// 本测试刻意只走真实入口：Scan 写入（不手工塞关键词），
+// 再用整句查询。旧的子串匹配在这里必然失败。
+func TestDredgeMatchesNaturalLanguageQuery(t *testing.T) {
+	s := newStore()
+	s.Tick(100)
+	s.Ingest(Message{From: "张三", Text: "周末去看展吗"})
+	s.Ingest(Message{From: "我", Text: "好啊"})
+	s.Scan(5)
+
+	// 整句意图——正是 dredgeQuery 会传进来的形状。
+	got := s.Dredge([]string{"翻翻昨天聊过的看展的事打发时间"}, 110)
+	if len(got) == 0 {
+		t.Fatal("整句查询应能打捞出含相关内容的翻阅段落——" +
+			"若失败说明查询侧没有切词元，整句永远匹配不上")
+	}
+	if !strings.Contains(got[0], "周末去看展吗") {
+		t.Errorf("打捞结果应含相关消息，实际 %q", got[0])
+	}
+
+	// 反向：查询里没有的词元不该命中，否则等于"什么都捞"。
+	if got := s.Dredge([]string{"明天记得交周报"}, 110); len(got) != 0 {
+		t.Errorf("无关查询不应命中，却得到 %v", got)
+	}
+}
+
+// TestTokenizeBasics 钉住词元化的形状：中文出 2/3-gram，拉丁整词。
+func TestTokenizeBasics(t *testing.T) {
+	got := tokenize("看展 kanzhan")
+	want := map[string]bool{"看展": true, "kanzhan": true}
+	for w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("词元里缺少 %q，实际 %v", w, got)
+		}
+	}
+	// 单字不成词元（太泛），标点不产出词元。
+	for _, g := range tokenize("的，。") {
+		if len([]rune(g)) < 2 {
+			t.Errorf("不应产出单字词元 %q", g)
+		}
+	}
+	// 虚词组合被滤掉。
+	for _, g := range tokenize("什么") {
+		if g == "什么" {
+			t.Error("纯功能词不应作为词元")
+		}
+	}
+}

@@ -11,8 +11,16 @@ import "github.com/Sparrived/SiriusRealLife/internal/fsm"
 // 只返回文本：状态机不需要知道消息的 ID、来源、重要性。
 
 // Scan 实现 fsm.Attention：最近 n 条未读的文本。
+//
+// **副作用**：这批消息同时写入待选区。这就是"看手机时看到的都写"
+// ——她扫过一眼的内容成为记忆的起点，此后才谈得上打捞、升格、遗忘。
+//
+// 放在 Scan 而不是 fsm 侧：Scan 是"看到内容"的唯一收口（Pump 与
+// ReadPhone 都走它），写在这里天然覆盖所有可见路径，也不会让状态机
+// 知道"记忆层"这个概念（R7 修订：被门控的是信息）。
 func (s *Store) Scan(n int) []string {
 	msgs := s.scanMessages(n)
+	s.rememberSeen(msgs)
 	out := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, formatMessage(m))
@@ -21,8 +29,11 @@ func (s *Store) Scan(n int) []string {
 }
 
 // Browse 实现 fsm.Attention：更早的 n 条文本。
+//
+// 与 Scan 同样写入待选区：往回翻旧账看到的内容，同样是"看到的"。
 func (s *Store) Browse(n int) []string {
 	msgs := s.browseMessages(n)
+	s.rememberSeen(msgs)
 	out := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, formatMessage(m))
@@ -53,11 +64,21 @@ func formatMessage(m Message) string {
 	case m.RepliesToMe:
 		tag = "（回复了你）"
 	}
-	body := m.Text
+	return tag + messageBody(m)
+}
+
+// messageBody 渲染"谁说了什么"，不含提及标记。
+//
+// 与 formatMessage 分开是为了关键词：标记是给模型看的提示词
+// （"（提到了你）"），不该混进检索词元里——否则每条 @ 消息都会
+// 带上"提到""到了"这些没有区分度的词元，打捞会被它们带偏。
+// 落库的正文仍用 formatMessage（她看到什么就记什么），
+// 关键词基于 messageBody。
+func messageBody(m Message) string {
 	if m.From != "" {
-		body = m.From + ": " + m.Text
+		return m.From + ": " + m.Text
 	}
-	return tag + body
+	return m.Text
 }
 
 // Accept 实现 fsm.MessageSink：把一条外部消息收进 unread 队列。
