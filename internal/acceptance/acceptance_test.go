@@ -212,6 +212,7 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 		Broadcaster: broadcast,
 		Logger:      logger,
 		AgentID:     "sirius",
+		Memory:      store,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -505,6 +506,108 @@ func TestAcceptanceTickDrivesMemory(t *testing.T) {
 		t.Fatal("agent 前进 1000 tick 后记忆应已沉入 Shadow——" +
 			"若失败说明 Ticker 没接上，记忆在真实运行中永不遗忘")
 	}
+}
+
+// TestAcceptanceMemoryWriteChain 验收：整条记忆写入链路在真实运行中活着。
+//
+// 这条测试针对的是一类**最难发现的故障**：每一层都有实现、都有单测、
+// 接口看着全对，但没有任何写入方，于是真实运行中待选区恒为空、
+// 打捞恒空、升格与 Shadow 永不发生。此前正是如此——四层记忆一层都不动。
+//
+// 因此断言全部走真实入口，不手工调 Store 的内部方法：
+//   - 消息从 **HTTP /events** 进来（与生产同一个入口）
+//   - 由 agent 自己的 Step 循环泵入（Pump → Scan → 写入）
+//   - 快照里的 memory 字段从 **HTTP GET** 读出来
+//   - 打捞用**整句**意图查询（dredgeQuery 的真实形状）
+func TestAcceptanceMemoryWriteChain(t *testing.T) {
+	h := newHarness(t, "working", fakeChatter{reply: "嗯"})
+	ctx := context.Background()
+
+	// 先跑几 tick 让时钟离开 0：会话分组依赖真实 tick。
+	for i := 0; i < 3; i++ {
+		h.agent.Step(ctx)
+	}
+
+	// 消息经真实 HTTP 入口投递。
+	for _, m := range []string{
+		`{"from":"张三","text":"周末去看展吗"}`,
+		`{"from":"李四","text":"听说那个展挺好的"}`,
+	} {
+		resp, err := http.Post(h.server.URL+"/api/v1/agents/sirius/events",
+			"application/json", strings.NewReader(m))
+		if err != nil {
+			t.Fatalf("POST 事件: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("投递事件状态码 = %d", resp.StatusCode)
+		}
+	}
+
+	// working 不订阅 QQ：消息进了 unread，但没被"看到"，不该写待选区。
+	h.agent.Step(ctx)
+	if got := h.store.StagingLen(); got != 0 {
+		t.Fatalf("没看手机时不该写入待选区，实际 %d 条", got)
+	}
+
+	// 切到订阅 QQ 的状态，泵入把内容带进"眼前"。
+	h.agent.Current = "scrolling_phone"
+	h.agent.Step(ctx)
+
+	// 走真实 HTTP 读快照，确认写入确实发生了。
+	staging := h.snapshotMemory(t).Staging
+	if staging == 0 {
+		t.Fatal("看手机后待选区仍为空——记忆写入链路断了：" +
+			"Pump/ReadPhone 看到的内容必须写入待选区")
+	}
+
+	// 用**整句**意图打捞（dredgeQuery 的真实形状，不是关键词）。
+	got := h.store.Dredge([]string{"翻翻昨天聊过的看展的事打发时间"}, h.agent.Now)
+	if len(got) == 0 {
+		t.Fatal("整句查询打捞不到刚看到的内容——查询侧没有切词元，整句永远匹配不上")
+	}
+	if !strings.Contains(got[0], "周末去看展吗") {
+		t.Errorf("打捞结果应含刚看到的消息，实际 %q", got[0])
+	}
+
+	// 打捞把这段推成事件记忆：整条链路一路走到升格。
+	for i := 0; i < 3; i++ {
+		h.store.Dredge([]string{"看展"}, h.agent.Now+fsm.Tick(i))
+	}
+	h.agent.Step(ctx)
+	if got := h.snapshotMemory(t).Events; got == 0 {
+		t.Error("反复打捞应触发升格，事件记忆仍为 0")
+	}
+}
+
+// snapshotMemory 经 HTTP 读快照里的 memory 字段。
+//
+// 刻意走 HTTP 而不是读 h.store：要验证的是**用户/运维能看到什么**，
+// 观测面没接上的话，链路活着也等于看不见。
+func (h *harness) snapshotMemory(t *testing.T) struct {
+	Messages int `json:"messages"`
+	Staging  int `json:"staging"`
+	Events   int `json:"events"`
+	Shadow   int `json:"shadow"`
+} {
+	t.Helper()
+	resp, err := http.Get(h.server.URL + "/api/v1/agents/sirius")
+	if err != nil {
+		t.Fatalf("GET 状态: %v", err)
+	}
+	defer resp.Body.Close()
+	var got struct {
+		Memory struct {
+			Messages int `json:"messages"`
+			Staging  int `json:"staging"`
+			Events   int `json:"events"`
+			Shadow   int `json:"shadow"`
+		} `json:"memory"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("解析快照: %v", err)
+	}
+	return got.Memory
 }
 
 // TestAcceptanceHTTPIntegration 验证 HTTP 层与 agent 真的接上了。
