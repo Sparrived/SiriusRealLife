@@ -64,6 +64,14 @@ const (
 // 换了状态再回来是新的驻留，可以重新翻。
 const maxReadApps = 2
 
+// readAppBudgetHint 是翻页预算用尽时写进意识流的一句话。
+//
+// 必须是**模型看得见**的观察，不能只写日志。线上实测只写日志时，模型
+// 根本不知道自己被拒了，于是每 3 tick 重念一遍"先翻开 QQ"再被拒——
+// 20+ 次调用全烧在这上面，而且行为上像卡带。这与"LLM 失败要能看见"
+// 是同一条道理：拒绝也要有反馈，否则对方只会重试。
+const readAppBudgetHint = "刚翻过了，这会儿没有更多可看的，别翻了"
+
 // 单次翻页的条数：默认值与硬上限。
 const (
 	defaultReadAppLimit = 10
@@ -268,8 +276,9 @@ func (a *Agent) readAppTool() *ToolSpec {
 		string(enumJSON), defaultReadAppLimit)
 	return &ToolSpec{
 		Name: toolReadApp,
-		Description: "翻开手机上的 app 看内容（往上翻更早的聊天）。" +
-			"信息不够、想先看一眼再决定的时候用它；我会把内容摆到你眼前，" +
+		Description: "往上翻这个 app **更早**的聊天记录。" +
+			"刚收到、已经在你眼前的消息不用翻——【刚发生】里就有。" +
+			"只有想不起来更早聊过什么的时候才用它；我会把翻到的内容摆到你眼前，" +
 			"并把你以前的相关记忆一起想起来，然后重新问你要做什么。",
 		Parameters: json.RawMessage(params),
 	}
@@ -357,12 +366,16 @@ func (a *Agent) applyDecision(ctx context.Context, res llmResult) {
 			// 仍非空、且已无在途调用，于是自动重新问一次决策——
 			// 那时内容和记忆都已经在意识流里了。
 			if a.readApps >= maxReadApps {
+				// 拒绝也要有反馈：只写日志的话模型会一直重试同一件事。
+				a.appendStreamKind(KindObservation, readAppBudgetHint)
 				a.log.Warn("read_app_over_budget", "used", a.readApps)
 				continue
 			}
 			if err := a.beginReadApp(ctx, c.Arguments); err != nil {
-				// 读不成（app 看不见、参数坏了）：当成"没识别到这个调用"，
-				// 交给后面的调用或降级分支，而不是把这次询问丢掉。
+				// 读不成（app 看不见、参数坏了）：同样要**让模型看见**，
+				// 然后当成"没识别到这个调用"，交给后面的调用或降级分支
+				// ——而不是把这次询问丢掉。
+				a.appendStreamKind(KindObservation, "想翻开看看，可这会儿看不到它")
 				a.log.Warn("read_app_failed", "err", err.Error())
 				continue
 			}

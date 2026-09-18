@@ -317,6 +317,12 @@ func TestReadAppIsBounded(t *testing.T) {
 		t.Errorf("预算应被耗尽且不因重新决策而回血，实际 %d（上限 %d）",
 			a.readApps, maxReadApps)
 	}
+	// 拒绝**必须让模型看见**：只写日志的话它会一直重试同一件事。
+	// 线上实测：不告诉它，它就每 3 tick 重念一遍"先翻开 QQ"再被拒。
+	if got := streamJoined(a); !strings.Contains(got, readAppBudgetHint) {
+		t.Errorf("预算用尽时应在意识流里留下提示，实际:\n%s", got)
+	}
+
 	// 换状态才重置：新的一次驻留可以重新翻。
 	if err := a.commitEnter("working", 5, "换个事做"); err != nil {
 		t.Fatalf("commitEnter: %v", err)
