@@ -17,12 +17,17 @@ const rows = computed(() =>
   LAYERS.map((l) => ({ ...l, value: props.memory?.[l.key] ?? 0 })),
 )
 
-// staging 长期为 0 是**故障信号**，不是"她很干净"。
+// staging 为 0 只在"系统确实动过"时才算异常。
 //
-// 这条链路出过一次最难发现的故障：四层记忆都有实现、都有单测，但没有任何
-// 写入方——待选区恒为空、打捞恒空、升格与 Shadow 永不发生，而接口看着全对。
-// 所以这个面板存在的意义就是让那件事一眼可见。
-const stagingEmpty = computed(() => props.memory != null && (props.memory.staging ?? 0) === 0)
+// 全新启动时它本来就是 0（连消息都还没有），那时报出来是假告警——
+// 而假告警的代价是训练人忽略这个面板，正好毁掉它存在的理由。
+// 所以要求另外三层里有任何一个非 0：收过消息、升格过、或遗忘过。
+const stagingEmpty = computed(() => {
+  const m = props.memory
+  if (!m) return false
+  const activity = (m.messages ?? 0) + (m.events ?? 0) + (m.shadow ?? 0)
+  return activity > 0 && (m.staging ?? 0) === 0
+})
 </script>
 
 <template>
@@ -34,7 +39,7 @@ const stagingEmpty = computed(() => props.memory != null && (props.memory.stagin
       </li>
     </ul>
     <p v-if="stagingEmpty" class="warn">
-      待选区为空。若她刚看过手机，说明写入链路断了。
+      收到过消息或遗忘过，但待选区一条都没有。若她刚看过手机，说明写入链路断了。
     </p>
     <p v-else class="note">待选区：看到的内容与她说过的话都写在这里。</p>
   </div>
