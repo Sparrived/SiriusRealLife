@@ -109,10 +109,21 @@ services:
       # 独白由状态进入触发，而状态平均只停留几 tick，不节流等于每次
       # 状态转移都发一次调用。默认 30（游戏内半小时）。
       SIRIUS_MONOLOGUE_EVERY: ${SIRIUS_MONOLOGUE_EVERY:-30}
+      # HTTP Basic 鉴权。两个都填才生效，只填一个进程会拒绝启动——
+      # 半开的鉴权比没有更危险（以为配了密码，实际不校验）。
+      #
+      # 留空 = 不启用，适合只绑宿主回环的本机开发。**经隧道/反代对外时
+      # 必须填**：/amkr/ 反代等同于 AMKR 的完整管理权限，能读到上游 key。
+      # 这正是 AGENTS.md §4 那条"没有鉴权只能绑回环"的解法。
+      SIRIUS_AUTH_USER: ${SIRIUS_AUTH_USER:-}
+      SIRIUS_AUTH_PASS: ${SIRIUS_AUTH_PASS:-}
       TZ: Asia/Shanghai
     ports:
-      # ⚠️ 只绑宿主回环。写成 "8080:8080" 会把 /amkr/（AMKR 完整管理权限）
-      # 暴露给整个网络 —— Sirius 自身还没有鉴权。
+      # ⚠️ 只绑宿主回环。唯一被允许的对外入口是有鉴权与 TLS 的那条
+      # （Cloudflare Tunnel → 127.0.0.1:18080）。
+      #
+      # 即便开了 SIRIUS_AUTH_*，也**不要**把端口直接映射到 0.0.0.0：
+      # 那会让 Basic 凭据走明文 HTTP，而隧道那条路是 HTTPS。
       #
       # 宿主端口用变量：生产服务器上 8080 已被别的服务占用（实测
       # sirius-pulse-v2-test 以 host 网络占着 0.0.0.0:8080），因此那里
