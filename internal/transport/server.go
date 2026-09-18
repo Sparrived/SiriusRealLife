@@ -4,7 +4,6 @@
 package transport
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -131,6 +130,8 @@ type MemoryCounts interface {
 type Server struct {
 	opt Options
 	log *slog.Logger
+	// sess 是会话签名器，惰性构造（见 session.go）。未启用鉴权时永远为 nil。
+	sess *sessionSigner
 }
 
 // NewServer 构造 Server。
@@ -156,6 +157,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+base+"/stream", s.handleStream)
 	mux.HandleFunc("POST "+base+"/events", s.handleEvent)
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	// 登录/登出在鉴权之外（见 exemptPath）：否则登录页自己也要先登录。
+	// 用不带方法的模式：登录页 GET，提交 POST，都要落到同一个 handler。
+	mux.HandleFunc(loginPath, s.handleLogin)
+	mux.HandleFunc(logoutPath, s.handleLogout)
 
 	if s.opt.StaticDir != "" {
 		// 刻意**不**用 "GET /"：那会与 "/amkr/" 冲突 —— Go 1.22 的 ServeMux
@@ -170,38 +175,46 @@ func (s *Server) Handler() http.Handler {
 		// 路径 1:1 透传，不改写任何段（docs/llm-amkr.md §4）。
 		mux.Handle("/amkr/", s.opt.Proxy)
 	}
-	if s.opt.AuthUser == "" || s.opt.AuthPass == "" {
+	if !s.authEnabled() {
 		return mux
 	}
 	return s.requireAuth(mux)
 }
 
-// requireAuth 给整个 handler 套上 HTTP Basic 鉴权。
+// requireAuth 给整个 handler 套上鉴权。
 //
 // **包住全部路由**，包括 /amkr/：那个反代等同于 AMKR 的完整管理权限，
-// 是这条隧道最需要挡住的东西。健康检查例外——它只报"AMKR 通不通"，
-// 不含任何私人内容，留空可以让监控与容器探针不带凭据。
+// 是这条隧道最需要挡住的东西。
 //
-// 用标准库的 subtle.ConstantTimeCompare 而不是 ==：比较凭据时不要把
-// 长度/前缀差异泄漏成时间差。
+// 两条路都认：
+//   - **会话 cookie** —— 人走这条。浏览器导航带不上 Authorization 头，
+//     所以"登录之后直接进 /amkr/"只能靠 cookie。
+//   - **HTTP Basic** —— curl、脚本、监控走这条，不必先登录拿 cookie。
+//
+// 关键细节：**非 Basic 的 Authorization 头不能被当成"凭据错误"**。
+// AMKR 的 WebUI 会给每个请求带上自己的 `Authorization: Bearer `，
+// 那是给上游 AMKR 的、不是用来登录 Sirius 的；把它当失败会让"登录成功
+// 却打不开 /amkr/"——而那正是这次要做的单点登录。
+//
+// 未通过时区别对待：浏览器（Accept: text/html）送去登录页并带回跳地址，
+// fetch/EventSource 拿 401（前端据此跳转，而不是把 HTML 当 JSON 解析）。
 func (s *Server) requireAuth(next http.Handler) http.Handler {
-	user := []byte(s.opt.AuthUser)
-	pass := []byte(s.opt.AuthPass)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/health" {
+		if exemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		u, p, ok := r.BasicAuth()
-		// 两个比较都要做，不能短路——短路会让"用户名对不对"变成时间差。
-		userOK := subtle.ConstantTimeCompare([]byte(u), user) == 1
-		passOK := subtle.ConstantTimeCompare([]byte(p), pass) == 1
-		if !ok || !userOK || !passOK {
-			// Realm 用中文：浏览器弹出的登录框会直接显示它。
+		if !s.authed(r) {
+			if wantsHTML(r) {
+				loginRedirect(w, r)
+				return
+			}
+			// Realm 保留：脚本与 curl 看到它就知道该用 Basic。
 			w.Header().Set("WWW-Authenticate", `Basic realm="Sirius", charset="UTF-8"`)
-			http.Error(w, "需要登录", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "unauthorized", "需要登录")
 			return
 		}
+		s.refreshSession(w, r)
 		next.ServeHTTP(w, r)
 	})
 }
