@@ -101,6 +101,22 @@ type Options struct {
 	Proxy http.Handler
 	// Ready 报告 AMKR 是否可用，用于 /api/v1/health。
 	Ready func() bool
+	// Memory 暴露记忆各层条数，用于快照里的 memory 字段。
+	//
+	// 结构化接口而非 import memory 包：transport 只需要几个计数，
+	// 不该为此依赖记忆层的类型（也避免 memory → fsm ← transport
+	// 之间再多一条边）。为 nil 时快照里不出现 memory 字段。
+	Memory MemoryCounts
+}
+
+// MemoryCounts 是记忆各层条数的最小接口。
+//
+// 由 *memory.Store 隐式满足（与 fsm.Attention 同样的手法）。
+type MemoryCounts interface {
+	MessagesLen() int
+	StagingLen() int
+	EventsLen() int
+	ShadowLen() int
 }
 
 // Server 组装全部 HTTP 路由。
@@ -159,6 +175,25 @@ type stateResponse struct {
 	CallCount int            `json:"call_count"`
 	Stream    []streamEntry  `json:"stream"`
 	Last      *dispatchEntry `json:"last_dispatch,omitempty"`
+	// Memory 是记忆各层条数。
+	//
+	// 加它是因为这条链路出过一次最难发现的故障：四层记忆都有实现、
+	// 都有单测，但没有任何写入方，于是 staging 恒为 0、打捞恒空、
+	// 升格与 Shadow 永不发生——接口看着全对，实际一层都不动。
+	// 观测面必须能直接回答"待选区到底有没有东西"。
+	Memory *memoryResponse `json:"memory,omitempty"`
+}
+
+// memoryResponse 是记忆各层条数（§3）。
+type memoryResponse struct {
+	// Messages 是 unread 队列条数（含已读，§2.2）。
+	Messages int `json:"messages"`
+	// Staging 是待选区条数。**长期为 0 就是故障**：看手机时看到的
+	// 内容应当持续写入这里，它为空意味着写入链路断了。
+	Staging int `json:"staging"`
+	Events  int `json:"events"`
+	// Shadow 是终态存档条数（LLM 不可读，§3.1）。
+	Shadow int `json:"shadow"`
 }
 
 type moodResponse struct {
@@ -220,6 +255,14 @@ func (s *Server) toResponse(snap fsm.Snapshot) stateResponse {
 			d.Cands = append(d.Cands, candidateEntry{Name: string(c.Name), Blocked: c.Blocked})
 		}
 		out.Last = &d
+	}
+	if m := s.opt.Memory; m != nil {
+		out.Memory = &memoryResponse{
+			Messages: m.MessagesLen(),
+			Staging:  m.StagingLen(),
+			Events:   m.EventsLen(),
+			Shadow:   m.ShadowLen(),
+		}
 	}
 	return out
 }

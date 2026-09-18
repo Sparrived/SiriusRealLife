@@ -110,6 +110,9 @@ func run() error {
 		StaticDir:   opt.StaticDir,
 		Proxy:       proxy,
 		Ready:       func() bool { return amkrReachable(opt.AMKR.BaseURL) },
+		// 快照里带上记忆各层条数：staging 长期为 0 就是写入链路断了，
+		// 这个判断不该要求先 ssh 上去翻日志。
+		Memory: store,
 	})
 
 	srv := &http.Server{
