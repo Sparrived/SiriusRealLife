@@ -89,7 +89,7 @@ MVP 的 4 个状态（是否订阅 QQ 标在第二列）：
 | 状态决策的可靠性 | **已定（有硬约束）** | 候选状态进工具 schema 的 `enum`，`commitEnter` 再复核一次；任何失败降级为 `stay`。实测 wb2api **支持 `tools`**（但忽略 `response_format`），线上已观察到真实转移；降级分支仍必须保留，因为支持与否逐路由不同 |
 | 待选区写入 | **已落地** | 看手机时看到的都写入待选区（`Scan`/`Browse` 的副作用，不经工具调用），关键词由本地词元化产出；打捞按词元重合 + 稀有度加权返回整段。快照的 `memory.staging` 可直接观测，为 0 即链路断了。见 [`memory.md`](memory.md) §5.1 |
 | 翻阅工具 `read_app` | **已落地** | 决策点可调 `read_app`（信息不够时"先看一眼再决定"）：框架读内容 → 用**刚读到的内容**打捞 → 发起工具结果轮（不带状态工具，只读懂与回应）→ 重新问状态决策。读取次数有预算（`maxReadApps`）。`app` 的 enum 由当前状态订阅的通道推出，读看不见的 app 会被拒 |
-| 回复工具 `send_message` | 待定 | `read_app` 只负责**看到内容**，回复走 `send_message`。尚无出站通道（没有真实 QQ 发送端），因此先不做——它的形状取决于"她说出去的话"要不要也进记忆层 |
+| 回复工具 `send_message` | **已落地（无出站通道）** | 只在工具结果轮提供（**不带状态工具**，回复不改状态）。她的话进意识流（动作）+ 进待选区（同一段翻阅，importance 6）。`Outbox` 缝口已就位，但**还没接真实发送端**：`Outbox` 为 nil 时话只进记忆并留一条 `outbox_missing` 日志，不假装成功。快接上时只需实现 `fsm.Outbox` |
 | Sirius 自身鉴权 | **阻塞项** | 没有它就不能把 `/amkr/` 暴露到 localhost 之外。容器部署因此有一条硬约束：端口只能映射到宿主回环（见 `docker-compose.yml`） |
 | 持久化 | v1 全内存 | 重启即清零，Phase 1 够用。⚠️ **Phase 2 起向量必须落盘**：它是项目资产，且重算 embedding 等于重复付费调 AMKR。见 [`memory.md`](memory.md) §5.2 |
 | 前端设计风格 | **已定** | 实时观测仪表盘（非营销页）：单一强调色 + 发丝线分组 + 系统字体栈，`DESIGN_VARIANCE 6 / MOTION_INTENSITY 4 / VISUAL_DENSITY 6`。取值与理由见 [`web/README.md`](../web/README.md)，对比度由 `npm run check:contrast` 断言 |

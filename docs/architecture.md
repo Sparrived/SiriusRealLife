@@ -184,7 +184,8 @@ func quietEnoughToLeave(a *Agent) bool {
         LLM 调 stay / enter_state / read_app（异步，可取消）
                     │
                     ├─ read_app：读内容 ──► 用刚读到的内容打捞记忆
-                    │              ──► 工具结果轮（SiteToolRead，**不改状态**）
+                    │              ──► 工具结果轮（SiteToolRead）
+                    │                  只带 send_message，**不改状态**
                     │              ──► 重新问一次决策（次数有预算）
                     ▼
          applyDecision ──► enter() ──► OnEnter ──► 订阅下一段
