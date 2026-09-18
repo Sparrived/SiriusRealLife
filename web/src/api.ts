@@ -35,18 +35,47 @@ export function kindMeta(kind: string): { mark: string; label: string } {
   return KIND_META[kind as StreamKind] ?? { mark: '·', label: kind }
 }
 
+// Candidate 是一个候选状态。
+//
+// **没有权重**：R3 之后框架里没有随机，也不做加权抽取——候选清单只是
+// "此刻可以进哪些"，外加不能进的原因。旧的 weight 是加权抽取时代的残留，
+// 后端早已不再返回，留在这里会让渲染直接抛 undefined.toFixed。
 export interface Candidate {
   name: string
-  weight: number
+  /** 非空表示它没进候选，值是原因（中文，给人看的）。 */
+  blocked?: string
 }
 
 export interface Dispatch {
   from: string
   to: string
+  /**
+   * 决定的来源。只有两个取值：
+   *   llm  —— 模型选了另一个状态（这是唯一的"转移"）
+   *   stay —— 继续留在原状态（模型主动选的，或调用失败后的降级）
+   * 抢占取消后没有 preempt，框架不再有任何能改变状态的来源。
+   */
   reason: string
-  roll: number
-  total: number
+  /** 模型给的理由（第一人称）。这是"为什么是这个状态"的**唯一依据**（R6）。 */
+  why: string
+  /** 这次决定的停留时长（夹紧之后的实际值）。 */
+  for_ticks: number
   candidates: Candidate[]
+}
+
+// Memory 是记忆各层条数（memory.md §3）。
+//
+// staging 长期为 0 就是故障：看手机时看到的内容应当持续写入那里。
+// 这条链路出过"四层都有实现、都有单测、但没有任何写入方"的故障，
+// 界面上必须能一眼看出它是不是空的。
+export interface Memory {
+  /** unread 队列条数（含已读，§2.2）。 */
+  messages: number
+  /** 待选区条数。为 0 即写入链路断了。 */
+  staging: number
+  events: number
+  /** 终态存档条数（LLM 不可读，§3.1）。 */
+  shadow: number
 }
 
 export interface Snapshot {
@@ -57,6 +86,7 @@ export interface Snapshot {
   thinking: boolean
   call_count: number
   stream: StreamEntry[] | null
+  memory?: Memory
   last_dispatch?: Dispatch
 }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import ConsciousnessStream from './components/ConsciousnessStream.vue'
+import MemoryPanel from './components/MemoryPanel.vue'
 import MoodMeters from './components/MoodMeters.vue'
 import StateGraph from './components/StateGraph.vue'
 import { postEvent, stateMeta } from './api'
@@ -100,6 +101,11 @@ const follow = computed(() => a.conn.value === 'live')
         </section>
 
         <section class="panel">
+          <h2 class="ph">记忆</h2>
+          <MemoryPanel :memory="a.snapshot.value?.memory ?? null" />
+        </section>
+
+        <section class="panel">
           <h2 class="ph">AMKR</h2>
           <p class="amkr">
             <span class="adot" :data-ready="a.health.value?.amkr.ready ? '1' : '0'" aria-hidden="true" />
@@ -137,12 +143,12 @@ const follow = computed(() => a.conn.value === 'live')
           </div>
           <label class="check">
             <input v-model="mentions" type="checkbox" />
-            <span>@ 他（可打断当前状态）</span>
+            <span>@ 她（只是更显眼，不打断当前状态）</span>
           </label>
           <p v-if="sendError" class="ierr" role="alert">{{ sendError }}</p>
           <p v-else-if="sent" class="iok">已投递 {{ sent }} 条</p>
           <p class="inote">
-            消息不会立刻进意识流：只有在他进入「刷手机」时才看得到，其余状态静默入队。
+            消息不会立刻进意识流：只有在她进入「刷手机」时才看得到，其余状态静默入队。
           </p>
         </form>
       </section>

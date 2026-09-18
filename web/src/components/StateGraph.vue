@@ -24,30 +24,46 @@ const nodes = computed(() =>
 
 const dispatch = computed<Dispatch | null>(() => props.snapshot?.last_dispatch ?? null)
 
-/** 候选权重按最大值归一，用于条形长度。 */
-const candidates = computed(() => {
-  const d = dispatch.value
-  if (!d?.candidates?.length) return []
-  const max = Math.max(...d.candidates.map((c) => c.weight))
-  return d.candidates.map((c) => ({
-    name: c.name,
-    label: stateMeta(c.name).label,
-    weight: c.weight,
-    pct: max > 0 ? (c.weight / max) * 100 : 0,
-    // 哪个候选中标：直接用 to，不在这里重算加权抽取。
-    // 重算等于把 Go 侧 dispatch() 的累减逻辑抄一遍，一旦那边调整
-    // 就会悄悄不一致；to 本来就是那次抽取的结果。
-    chosen: c.name === d.to,
-  }))
+// candidates 把候选清单摆成"能进的"与"被挡掉的"两组。
+//
+// 这里**不算权重、不重算抽取**：R3 之后没有随机，谁被选中只看 `to`。
+// 真正有排障价值的是 blocked ——"为什么她从来不去睡觉？"是问得最多的问题，
+// 而答案（Guard 没过 / 冷却中 / 就是当前状态）只有后端知道。
+const blockedMap = computed(() => {
+  const m = new Map<string, string>()
+  for (const c of dispatch.value?.candidates ?? []) {
+    if (c.blocked) m.set(c.name, c.blocked)
+  }
+  return m
 })
 
-/** 转移原因的中文说明（对应 R6 日志的 reason 字段）。 */
+const choosable = computed(() =>
+  (dispatch.value?.candidates ?? [])
+    .filter((c) => !c.blocked)
+    .map((c) => ({
+      name: c.name,
+      label: stateMeta(c.name).label,
+      chosen: c.name === dispatch.value?.to,
+    })),
+)
+
+const blocked = computed(() =>
+  (dispatch.value?.candidates ?? [])
+    .filter((c) => c.blocked)
+    .map((c) => ({
+      name: c.name,
+      label: stateMeta(c.name).label,
+      why: blockedMap.value.get(c.name) ?? '',
+    })),
+)
+
+/** 决定来源的中文说明（对应 R6 日志的 reason 字段）。 */
 const reasonText = computed(() => {
   switch (dispatch.value?.reason) {
-    case 'timeout':
-      return '停留到期，加权抽取'
-    case 'init':
-      return '初始状态'
+    case 'llm':
+      return '模型自己选的'
+    case 'stay':
+      return '留在原状态（模型选的，或调用失败后的降级）'
     default:
       return dispatch.value?.reason ?? ''
   }
@@ -73,27 +89,34 @@ const reasonText = computed(() => {
 
     <div v-if="dispatch" class="dispatch">
       <div class="dhead">
-        <span class="dtitle">上次分派</span>
+        <span class="dtitle">上次决定</span>
         <span class="num dim">{{ dispatch.from }} → {{ dispatch.to }}</span>
       </div>
       <p class="reason">{{ reasonText }}</p>
 
-      <ul class="cands">
-        <li v-for="c in candidates" :key="c.name" :class="{ chosen: c.chosen }">
+      <!-- R6：模型给的理由是"为什么是这个状态"的唯一依据。 -->
+      <p v-if="dispatch.why" class="why">「{{ dispatch.why }}」</p>
+      <p class="for num">下次再问：{{ dispatch.for_ticks }} tick 后</p>
+
+      <ul v-if="choosable.length" class="cands">
+        <li v-for="c in choosable" :key="c.name" :class="{ chosen: c.chosen }">
+          <span class="mark" aria-hidden="true">{{ c.chosen ? '▸' : '·' }}</span>
           <span class="cname">{{ c.label }}</span>
-          <span class="cbar" aria-hidden="true">
-            <i :style="{ width: c.pct + '%' }" />
-          </span>
-          <span class="num cw">{{ c.weight.toFixed(1) }}</span>
         </li>
       </ul>
 
-      <!-- 把随机数摆出来：这是"为什么是这个状态"的唯一依据（R6）。 -->
-      <p class="roll num">
-        roll {{ dispatch.roll.toFixed(2) }} / total {{ dispatch.total.toFixed(2) }}
-      </p>
+      <template v-if="blocked.length">
+        <p class="sub">当时不能选</p>
+        <ul class="cands blocked">
+          <li v-for="c in blocked" :key="c.name">
+            <span class="mark" aria-hidden="true">×</span>
+            <span class="cname">{{ c.label }}</span>
+            <span class="cwhy">{{ c.why }}</span>
+          </li>
+        </ul>
+      </template>
     </div>
-    <p v-else class="pending">尚未发生状态转移</p>
+    <p v-else class="pending">尚未发生状态决定</p>
   </section>
 </template>
 
@@ -214,9 +237,31 @@ const reasonText = computed(() => {
   color: var(--text-dim);
 }
 
+/* 模型给的理由：R6 里最有价值的一行，用正文色而不是弱化色。 */
+.why {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.for {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.sub {
+  margin: 2px 0 0;
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .cands {
   display: grid;
-  gap: 5px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -224,9 +269,14 @@ const reasonText = computed(() => {
 
 .cands li {
   display: grid;
-  grid-template-columns: 52px 1fr 38px;
-  align-items: center;
-  gap: 8px;
+  grid-template-columns: 12px auto 1fr;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.mark {
+  font-size: 10px;
+  color: var(--text-faint);
 }
 
 .cname {
@@ -234,42 +284,19 @@ const reasonText = computed(() => {
   color: var(--text-faint);
 }
 
+.cands li.chosen .mark,
 .cands li.chosen .cname {
-  color: var(--text);
+  color: var(--accent);
 }
 
-.cbar {
-  height: 3px;
-  background: var(--bg-inset);
-  border-radius: 999px;
-  overflow: hidden;
+/* 被挡掉的原因：这一栏回答的是"为什么她不去睡觉"这类最常问的问题。 */
+.cands.blocked .cname {
+  color: var(--text-dim);
 }
 
-.cbar i {
-  display: block;
-  height: 100%;
-  background: var(--muted);
-  border-radius: 999px;
-  transition: width 200ms ease-out;
-}
-
-.cands li.chosen .cbar i {
-  background: var(--accent);
-}
-
-.cw {
-  font-size: 11px;
-  color: var(--text-faint);
-  text-align: right;
-}
-
-.cands li.chosen .cw {
-  color: var(--text);
-}
-
-.roll {
-  margin: 0;
-  font-size: 11px;
+.cwhy {
+  font-size: 10px;
+  line-height: 1.4;
   color: var(--text-faint);
 }
 
