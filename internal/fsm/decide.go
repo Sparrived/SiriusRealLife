@@ -455,8 +455,12 @@ func (a *Agent) beginReadApp(ctx context.Context, args json.RawMessage) error {
 	// 留给 dredgeQuery：打捞要拿"刚读到的内容"当查询词。
 	a.pendingRead = lines
 
+	// 工具结果轮：带上刚读到的内容（已在意识流里）与打捞回来的记忆，
+	// 并给它 send_message——读了消息却回不了话，那一轮就白读了。
+	// 它**不带状态工具**：状态决策随后由框架重新问一次。
 	return a.think(ctx, ChatRequest{
 		Prompt: a.Context(SiteToolRead, a.contextOptions()),
+		Tools:  a.toolReadTools(),
 	}, thinkToolRead)
 }
 

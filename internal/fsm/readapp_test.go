@@ -196,11 +196,12 @@ func (c *promptRecordingChatter) Chat(ctx context.Context, req ChatRequest) (Cha
 	return c.inner.Chat(ctx, req)
 }
 
-// toolReadTurnsCarryNoStateTools 验证工具结果轮不带状态工具。
+// TestToolReadRoundHasOnlySendMessage 验证工具结果轮的工具面。
 //
-// 用 prompt 文本判轮次（R1），再结合"那一轮 chat 请求的 Tools 为空"
-// 来断言——由 recordingChatter 一并记录。
-func TestToolReadRoundHasNoStateTools(t *testing.T) {
+// 它**不带状态工具**（stay/enter_state）：一次决定只改一次状态，回复不是
+// 改状态（R11）。但它**必须带 send_message**——读了消息却回不了话，
+// 那一轮就白读了。
+func TestToolReadRoundHasOnlySendMessage(t *testing.T) {
 	rec := &toolRecordingChatter{inner: &readAppChatter{maxReads: 1}}
 	a, _ := newReadAppAgent(t, rec, []string{"张三: 周末去看展吗"}, nil)
 	ctx := context.Background()
@@ -210,19 +211,24 @@ func TestToolReadRoundHasNoStateTools(t *testing.T) {
 
 	sawToolRead := false
 	for _, r := range rec.reqs {
-		isToolRead := strings.Contains(r.prompt, toolReadHint)
-		if !isToolRead {
+		if !strings.Contains(r.prompt, toolReadHint) {
 			continue
 		}
 		sawToolRead = true
-		if len(r.tools) != 0 {
-			t.Errorf("工具结果轮不该带工具（它不负责改状态），实际 %v", toolNames(r.tools))
+		if hasTool(r.tools, toolStay) || hasTool(r.tools, toolEnterState) {
+			t.Errorf("工具结果轮不该带状态工具（它不改状态），实际 %v", toolNames(r.tools))
+		}
+		if !hasTool(r.tools, toolSendMessage) {
+			t.Errorf("工具结果轮必须带 %s，否则读了消息也回不了话，实际 %v",
+				toolSendMessage, toolNames(r.tools))
 		}
 	}
 	if !sawToolRead {
 		t.Fatal("没有观察到工具结果轮")
 	}
-	// 反过来：状态决策轮必须仍然带 stay/enter_state。
+
+	// 反过来：状态决策轮必须带 stay/enter_state，且**不带** send_message
+	// ——回复不是改状态，两个工具面不重叠。
 	sawDecisionTools := false
 	for _, r := range rec.reqs {
 		if strings.Contains(r.prompt, toolReadHint) {
@@ -230,6 +236,9 @@ func TestToolReadRoundHasNoStateTools(t *testing.T) {
 		}
 		if hasTool(r.tools, toolStay) && hasTool(r.tools, toolEnterState) {
 			sawDecisionTools = true
+			if hasTool(r.tools, toolSendMessage) {
+				t.Errorf("状态决策轮不该带 %s，实际 %v", toolSendMessage, toolNames(r.tools))
+			}
 		}
 	}
 	if !sawDecisionTools {
@@ -331,5 +340,168 @@ func TestReadAppOnInvisibleAppIsIgnored(t *testing.T) {
 	}
 	if a.LastRecord().Reason == "" {
 		t.Fatal("读不成也必须做出决定，不能把这次询问丢掉")
+	}
+}
+
+// fakeRecorder 记录"她说过的话"，用于验证 send_message 真的进了记忆。
+type fakeRecorder struct{ got []string }
+
+func (f *fakeRecorder) Record(text string) { f.got = append(f.got, text) }
+
+// fakeOutbox 记录被送出去的消息。
+type fakeOutbox struct{ got []OutgoingMessage }
+
+func (o *fakeOutbox) Send(m OutgoingMessage) { o.got = append(o.got, m) }
+
+// sendChatter 在工具结果轮里真的回一句，其余同 readAppChatter。
+type sendChatter struct {
+	read    int
+	to      string
+	text    string
+	prompts []string
+}
+
+func (c *sendChatter) Chat(_ context.Context, req ChatRequest) (ChatResponse, error) {
+	if strings.Contains(req.Prompt, toolReadHint) {
+		c.prompts = append(c.prompts, req.Prompt)
+		args, _ := json.Marshal(map[string]any{"to": c.to, "text": c.text})
+		return ChatResponse{
+			Text: "我跟他说一声",
+			ToolCalls: []ToolCall{
+				{ID: "s1", Name: toolSendMessage, Arguments: args},
+			},
+		}, nil
+	}
+	if !hasTool(req.Tools, toolStay) {
+		// 独白轮之类：只回文本。
+		return ChatResponse{Text: "随便想想"}, nil
+	}
+	if c.read < 1 && hasTool(req.Tools, toolReadApp) {
+		c.read++
+		return ChatResponse{
+			Text:      "先翻翻看",
+			ToolCalls: []ToolCall{{ID: "r1", Name: toolReadApp, Arguments: json.RawMessage(`{"app":"qq","n":5}`)}},
+		}, nil
+	}
+	return ChatResponse{
+		Text: "先这样",
+		ToolCalls: []ToolCall{{
+			ID: "c1", Name: toolStay,
+			Arguments: json.RawMessage(`{"why":"说完了","for_ticks":5}`),
+		}},
+	}, nil
+}
+
+// TestSendMessageEntersStreamMemoryAndOutbox 验证回复的三条去向。
+//
+// 三件事缺一不可：
+//   - 进意识流：她说出口的话是她做过的事，否则下一轮会重复同一句；
+//   - 进记忆：**用户明确定过**"说出去的话肯定要进"——"我说过什么"与
+//     "我听到什么"一样是情节记忆，缺一半那段对话就只剩对方在自言自语；
+//   - 进 outbox：真的送出去（没有通道时留日志，不假装成功）。
+func TestSendMessageEntersStreamMemoryAndOutbox(t *testing.T) {
+	chatter := &sendChatter{to: "王五", text: "那个展叫「无尽的素描」"}
+	rec := &fakeRecorder{}
+	out := &fakeOutbox{}
+	att := &fakeAttention{backlog: []string{"王五: 上次说的展览叫啥"}}
+	a := newTestAgentWith(t, Options{
+		Name: "send", States: MVPStates(), Initial: "scrolling_phone",
+		Chatter: chatter, Attention: att, Recorder: rec, Outbox: out,
+	})
+	ctx := context.Background()
+	for i := 0; i < 12 && a.LastRecord().Reason == ""; i++ {
+		stepSync(t, a, ctx)
+	}
+
+	// 1) 进意识流，且类型是"动作"（她说出去的话是做过的事，不是想法）。
+	if got := streamJoined(a); !strings.Contains(got, "那个展叫「无尽的素描」") {
+		t.Errorf("回复没进意识流:\n%s", got)
+	}
+	foundAction := false
+	for _, e := range a.Stream {
+		if strings.Contains(e.Text, "无尽的素描") {
+			if e.Kind != KindAction {
+				t.Errorf("回复应以动作类型入意识流，实际 %v：%q", e.Kind, e.Text)
+			}
+			foundAction = true
+		}
+	}
+	if !foundAction {
+		t.Error("意识流里找不到这条回复")
+	}
+
+	// 2) 进记忆（用户定的：说出去的话肯定要进）。
+	if len(rec.got) != 1 || !strings.Contains(rec.got[0], "无尽的素描") {
+		t.Fatalf("回复应写入记忆，实际 %v", rec.got)
+	}
+	// 记的是"她说过什么"，带上回给谁才有情节。
+	if !strings.Contains(rec.got[0], "王五") {
+		t.Errorf("记忆里应含回给谁，实际 %q", rec.got[0])
+	}
+
+	// 3) 真的送出去，且送的是**原话**（不含"回王五："这类包装）。
+	if len(out.got) != 1 {
+		t.Fatalf("应送出 1 条，实际 %d", len(out.got))
+	}
+	if out.got[0].Text != "那个展叫「无尽的素描」" {
+		t.Errorf("送出的正文 = %q, 期望原话", out.got[0].Text)
+	}
+	if out.got[0].To != "王五" {
+		t.Errorf("送出的收件人 = %q", out.got[0].To)
+	}
+	// 带的是 agent 自己的 tick，不是 wall clock（R8）。
+	// 不能断言等于 a.Now：发完之后循环还会推进几个 tick 才做决定。
+	if t0 := out.got[0].Tick; t0 <= 0 || t0 > a.Now {
+		t.Errorf("送出的 tick = %d 不在 (0, %d] 内，疑似用了 wall clock（R8）", t0, a.Now)
+	}
+
+	// 发完之后仍然要回到状态决策：回复不改状态。
+	if a.LastRecord().Reason == "" {
+		t.Fatal("回复之后仍必须做出状态决定")
+	}
+}
+
+// TestSendMessageWithoutOutboxStillRecords 验证没有出站通道时的行为。
+//
+// 话仍进意识流与记忆，只是发不出去——不能因为没接通道就把整句话丢掉，
+// 那会让"我说过什么"凭空消失。也不能假装成功：sendMessage 会记日志。
+func TestSendMessageWithoutOutboxStillRecords(t *testing.T) {
+	chatter := &sendChatter{to: "张三", text: "周末我有空"}
+	rec := &fakeRecorder{}
+	att := &fakeAttention{backlog: []string{"张三: 周末去看展吗"}}
+	a := newTestAgentWith(t, Options{
+		Name: "noout", States: MVPStates(), Initial: "scrolling_phone",
+		Chatter: chatter, Attention: att, Recorder: rec,
+	})
+	ctx := context.Background()
+	for i := 0; i < 12 && a.LastRecord().Reason == ""; i++ {
+		stepSync(t, a, ctx)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("没有 outbox 时回复仍应进记忆，实际 %v", rec.got)
+	}
+	if got := streamJoined(a); !strings.Contains(got, "周末我有空") {
+		t.Errorf("没有 outbox 时回复仍应进意识流:\n%s", got)
+	}
+}
+
+// TestSendMessageToWhomUsesOwnWords 验证 to 为空时的措辞不串味。
+func TestSendMessageToWhomUsesOwnWords(t *testing.T) {
+	chatter := &sendChatter{text: "好"}
+	rec := &fakeRecorder{}
+	att := &fakeAttention{backlog: []string{"张三: 在吗"}}
+	a := newTestAgentWith(t, Options{
+		Name: "noto", States: MVPStates(), Initial: "scrolling_phone",
+		Chatter: chatter, Attention: att, Recorder: rec,
+	})
+	ctx := context.Background()
+	for i := 0; i < 12 && a.LastRecord().Reason == ""; i++ {
+		stepSync(t, a, ctx)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("应写入 1 条，实际 %v", rec.got)
+	}
+	if !strings.HasPrefix(rec.got[0], "回了句：") {
+		t.Errorf("没指定收件人时的记法 = %q", rec.got[0])
 	}
 }

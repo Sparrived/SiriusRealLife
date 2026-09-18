@@ -159,6 +159,9 @@ type Agent struct {
 	selfModel []string
 	// dredge 按查询词打捞记忆（memory.md §5.1）。
 	dredge func(query []string, now Tick) []string
+	// recorder 收下她说过的话；outbox 把她的回复送出去（见 send.go）。
+	recorder Recorder
+	outbox   Outbox
 
 	// readApps 是**本次决策**里已经读过几次 app（read_app 的预算，
 	// 见 maxReadApps）。由 endReadEpisode 在决策真正结束时清零。
@@ -224,6 +227,14 @@ type Options struct {
 	// 切词元由记忆层负责，它才知道待选区里存的是什么。
 	// now 是当前 tick：打捞要刷新记忆曲线，而记忆只认 tick（R8）。
 	Dredge func(query []string, now Tick) []string
+	// Recorder 收下"她说过的话"，写进记忆。为 nil 时她的话只进意识流。
+	//
+	// 说出去的话必须进记忆（§5.1）："我说过什么"与"我听到什么"一样是
+	// 情节记忆，缺一半那段对话就只剩对方在自言自语。
+	Recorder Recorder
+	// Outbox 把她的回复送出去。为 nil 表示还没有出站通道——那时她的话
+	// 仍进意识流与记忆，只是发不出去，并留下一条 outbox_missing 日志。
+	Outbox Outbox
 }
 
 // Snapshot 是 agent 状态的值快照。
@@ -314,6 +325,8 @@ func New(opt Options) (*Agent, error) {
 		ctxLimits:      opt.ContextLimits,
 		selfModel:      opt.SelfModel,
 		dredge:         opt.Dredge,
+		recorder:       opt.Recorder,
+		outbox:         opt.Outbox,
 		Mood:           Mood{Energy: 80, Annoyed: 0, Curious: 60},
 	}
 	if a.ctxLimits == (ContextLimits{}) {
@@ -668,10 +681,11 @@ func (a *Agent) absorbLLM(ctx context.Context, data json.RawMessage) {
 		}
 	case thinkToolRead:
 		// 工具结果轮：内容与记忆都已经由 absorbNarration 写进意识流。
-		// 这里什么都不用做——**刻意不改状态**，也不 commit。
-		// pending 仍非空且已无在途调用，所以本 tick 稍后的 consider
-		// 会自动重新问一次状态决策（那时内容已在【刚发生】里）。
-		if strings.TrimSpace(res.Text) == "" {
+		// 它**只能发消息，不能改状态**（见 applyToolRead）——状态决策
+		// 随后由本 tick 稍后的 consider 重新问一次（pending 仍非空、
+		// 且已无在途调用），那时内容已在【刚发生】里。
+		a.applyToolRead(res)
+		if strings.TrimSpace(res.Text) == "" && len(res.Calls) == 0 {
 			a.appendStreamKind(KindThought, "看明白了，但一时说不上来")
 		}
 	default:
