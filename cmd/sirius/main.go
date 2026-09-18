@@ -116,6 +116,9 @@ func run() error {
 		// 快照里带上记忆各层条数：staging 长期为 0 就是写入链路断了，
 		// 这个判断不该要求先 ssh 上去翻日志。
 		Memory: store,
+		// 配了凭据就对整个服务（含 /amkr/）要求 HTTP Basic。
+		AuthUser: opt.AuthUser,
+		AuthPass: opt.AuthPass,
 	})
 
 	srv := &http.Server{

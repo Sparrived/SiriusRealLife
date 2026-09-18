@@ -150,3 +150,45 @@ func TestLogLevelParsing(t *testing.T) {
 		t.Errorf("日志级别 = %s, 期望 DEBUG", opt.LogLevel)
 	}
 }
+
+// TestAuthRequiresBothHalves 验证只配一半直接报错。
+//
+// 半开的鉴权比没有更危险：部署方以为"我配了密码"，实际请求根本不校验
+// ——那正是"以为安全"变成"暴露在公网"的典型路径。
+func TestAuthRequiresBothHalves(t *testing.T) {
+	t.Setenv("SIRIUS_ADDR", "127.0.0.1:8080")
+	t.Setenv("SIRIUS_AUTH_USER", "sirius")
+	t.Setenv("SIRIUS_AUTH_PASS", "")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("只设用户名应当报错")
+	}
+
+	t.Setenv("SIRIUS_AUTH_USER", "")
+	t.Setenv("SIRIUS_AUTH_PASS", "s3cret")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("只设密码应当报错")
+	}
+}
+
+// TestAuthUserRejectsColon 验证用户名不能含冒号（RFC 7617）。
+func TestAuthUserRejectsColon(t *testing.T) {
+	t.Setenv("SIRIUS_ADDR", "127.0.0.1:8080")
+	t.Setenv("SIRIUS_AUTH_USER", "a:b")
+	t.Setenv("SIRIUS_AUTH_PASS", "s3cret")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("用户名含冒号应当报错")
+	}
+}
+
+// TestAuthOn 验证鉴权开关只在两半都齐时打开。
+func TestAuthOn(t *testing.T) {
+	if (Options{AuthUser: "u"}).AuthOn() {
+		t.Error("只有用户名时不该算开启")
+	}
+	if (Options{AuthPass: "p"}).AuthOn() {
+		t.Error("只有密码时不该算开启")
+	}
+	if !(Options{AuthUser: "u", AuthPass: "p"}).AuthOn() {
+		t.Error("两半都齐时应算开启")
+	}
+}

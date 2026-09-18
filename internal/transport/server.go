@@ -4,6 +4,7 @@
 package transport
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -107,6 +108,13 @@ type Options struct {
 	// 不该为此依赖记忆层的类型（也避免 memory → fsm ← transport
 	// 之间再多一条边）。为 nil 时快照里不出现 memory 字段。
 	Memory MemoryCounts
+	// AuthUser / AuthPass 非空时对整个服务启用 HTTP Basic 鉴权。
+	//
+	// 这是 AGENTS.md §4 那条安全线的前提：Sirius 没有自身鉴权之前只能绑
+	// 回环，因为 /amkr/ 反代等同于 AMKR 的完整管理权限（能读到上游 key）。
+	// 要把它挂到公网（隧道/反代），先补上这一层。
+	AuthUser string
+	AuthPass string
 }
 
 // MemoryCounts 是记忆各层条数的最小接口。
@@ -162,7 +170,40 @@ func (s *Server) Handler() http.Handler {
 		// 路径 1:1 透传，不改写任何段（docs/llm-amkr.md §4）。
 		mux.Handle("/amkr/", s.opt.Proxy)
 	}
-	return mux
+	if s.opt.AuthUser == "" || s.opt.AuthPass == "" {
+		return mux
+	}
+	return s.requireAuth(mux)
+}
+
+// requireAuth 给整个 handler 套上 HTTP Basic 鉴权。
+//
+// **包住全部路由**，包括 /amkr/：那个反代等同于 AMKR 的完整管理权限，
+// 是这条隧道最需要挡住的东西。健康检查例外——它只报"AMKR 通不通"，
+// 不含任何私人内容，留空可以让监控与容器探针不带凭据。
+//
+// 用标准库的 subtle.ConstantTimeCompare 而不是 ==：比较凭据时不要把
+// 长度/前缀差异泄漏成时间差。
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	user := []byte(s.opt.AuthUser)
+	pass := []byte(s.opt.AuthPass)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, p, ok := r.BasicAuth()
+		// 两个比较都要做，不能短路——短路会让"用户名对不对"变成时间差。
+		userOK := subtle.ConstantTimeCompare([]byte(u), user) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(p), pass) == 1
+		if !ok || !userOK || !passOK {
+			// Realm 用中文：浏览器弹出的登录框会直接显示它。
+			w.Header().Set("WWW-Authenticate", `Basic realm="Sirius", charset="UTF-8"`)
+			http.Error(w, "需要登录", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // stateResponse 是状态快照的 JSON 形状。字段 snake_case（conventions §3）。

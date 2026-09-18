@@ -37,7 +37,22 @@ type Options struct {
 	// NonLoopbackAcknowledged 表示本次启动**确实**绑在了非回环地址上，
 	// 供 main 打一条显眼的告警。它不是开关，是启动时的自检结果。
 	NonLoopbackAcknowledged bool
+
+	// AuthUser / AuthPass 是 HTTP Basic 的凭据。两者都非空才启用鉴权。
+	//
+	// 存在的理由很具体：AGENTS.md §4 规定"Sirius 自身具备鉴权之前只能绑
+	// 127.0.0.1"，因为 /amkr/ 反代等同于 AMKR 的完整管理权限（能读到上游
+	// key）。要把它挂到公网（Cloudflare Tunnel），就必须先把这个前提补上。
+	//
+	// 刻意用 Basic 而不是自建登录：隧道已经在 TLS 之上，Basic 是标准库
+	// 一行就能做的事，而自建会话/密码存储是又一份要维护的攻击面。
+	// 只设了其中一个视为配置错误——半开的鉴权比没有更危险。
+	AuthUser string
+	AuthPass string
 }
+
+// AuthOn 报告是否启用了 HTTP Basic 鉴权。
+func (o Options) AuthOn() bool { return o.AuthUser != "" && o.AuthPass != "" }
 
 // FromEnv 读环境变量并做校验。
 func FromEnv() (Options, error) {
@@ -81,6 +96,19 @@ func FromEnv() (Options, error) {
 	}
 	opt.LogLevel = parseLevel(envOr("SIRIUS_LOG_LEVEL", "info"))
 
+	// HTTP Basic 凭据。只设一半直接报错：半开的鉴权比没有更危险——
+	// 部署方以为"我配了密码"，实际请求根本不校验。
+	opt.AuthUser = strings.TrimSpace(os.Getenv("SIRIUS_AUTH_USER"))
+	opt.AuthPass = os.Getenv("SIRIUS_AUTH_PASS")
+	if (opt.AuthUser == "") != (opt.AuthPass == "") {
+		return Options{}, fmt.Errorf(
+			"config: SIRIUS_AUTH_USER 与 SIRIUS_AUTH_PASS 必须同时设置（或同时留空以关闭鉴权）")
+	}
+	if opt.AuthOn() && strings.ContainsAny(opt.AuthUser, ":") {
+		// Basic 的用户名里出现冒号会让凭据解析歧义（RFC 7617 禁止）。
+		return Options{}, fmt.Errorf("config: SIRIUS_AUTH_USER 不能含冒号")
+	}
+
 	// 独白间隔：默认 30 游戏分钟。这是成本闸门——独白会真的调用 LLM。
 	//
 	// 语义对齐 fsm：正值 = 最小间隔 tick 数；env 传 0 = **不节流**
@@ -110,16 +138,21 @@ func FromEnv() (Options, error) {
 	// 安全线（AGENTS.md §4）：Sirius 自身具备鉴权之前，只能绑回环地址。
 	// --allow-ops 会放行 AMKR 的宿主机运维接口，更不该对外。
 	//
-	// 容器里必须绑 0.0.0.0，否则 Docker 的端口映射转发不进容器。这个
-	// 例外由 SIRIUS_ALLOW_NON_LOOPBACK 显式开启：进程无法知道宿主侧的
-	// 端口映射，所以判断"是否真的只对宿主回环开放"只能靠部署方声明。
-	// 默认关闭，保持 fail-closed。
+	// **鉴权开启后**这条线才算有条件解除：`SIRIUS_AUTH_USER/PASS` 会对整个
+	// 服务（含 /amkr/）生效。但仍然要求显式声明 SIRIUS_ALLOW_NON_LOOPBACK
+	// ——进程无法知道宿主侧的端口映射，是否真的只对可信来源开放只能靠
+	// 部署方声明，默认保持 fail-closed。
 	if !isLoopback(opt.Addr) {
 		if !opt.AllowNonLoopback {
+			hint := "Sirius 尚无自身鉴权，且 /amkr/ 等同于 AMKR 完整管理权限"
+			if opt.AuthOn() {
+				hint = "已配置 HTTP Basic 鉴权，但对外监听仍需显式确认"
+			}
 			return Options{}, fmt.Errorf(
-				"config: SIRIUS_ADDR=%q 不是回环地址。Sirius 尚无自身鉴权，且 /amkr/ 等同于 AMKR 完整管理权限，禁止对外监听（AGENTS.md §4）。"+
-					"容器部署（必须绑 0.0.0.0）请设 SIRIUS_ALLOW_NON_LOOPBACK=1，并把 compose 的端口映射限制在宿主回环（127.0.0.1:8080:8080）",
-				opt.Addr)
+				"config: SIRIUS_ADDR=%q 不是回环地址。%s，禁止对外监听（AGENTS.md §4）。"+
+					"容器部署（必须绑 0.0.0.0）请设 SIRIUS_ALLOW_NON_LOOPBACK=1，"+
+					"并确保入口处有鉴权与 TLS（本机回环映射，或隧道 + SIRIUS_AUTH_USER/PASS）",
+				opt.Addr, hint)
 		}
 		opt.NonLoopbackAcknowledged = true
 	}
