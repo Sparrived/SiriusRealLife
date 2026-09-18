@@ -3,6 +3,7 @@ package fsm
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -278,9 +279,10 @@ func TestContextRespectsLimits(t *testing.T) {
 func TestContextDredgeIncluded(t *testing.T) {
 	a := newTestAgent(t, fakeChatter{})
 	a.appendStreamKind(KindIntent, "把那段代码写完")
+	a.pendingRead = []string{"张三: 周末去看展吗"}
 
 	var asked []string
-	got := a.Context(SiteDispatch, ContextOptions{
+	got := a.Context(SiteToolRead, ContextOptions{
 		Dredge: func(query []string, now Tick) []string {
 			asked = query
 			return []string{"上周也差不多是这个进度"}
@@ -289,12 +291,16 @@ func TestContextDredgeIncluded(t *testing.T) {
 	if !strings.Contains(got, "【想起的事】上周也差不多是这个进度") {
 		t.Errorf("打捞结果未进上下文:\n%s", got)
 	}
-	// 查询词应包含意图：用"此刻在想什么"去捞旧记忆才是联想。
-	if len(asked) == 0 || asked[0] != "把那段代码写完" {
-		t.Errorf("打捞查询词 = %v, 期望首项是当前意图", asked)
+	// 查询词首项应当是**刚读到的内容**：要回忆的是"这段内容让我想起什么"。
+	if len(asked) == 0 || asked[0] != "张三: 周末去看展吗" {
+		t.Errorf("打捞查询词 = %v, 期望首项是刚读到的内容", asked)
+	}
+	// 意图也要在里面，让联想不完全被眼前这条消息绑架。
+	if !slices.Contains(asked, "把那段代码写完") {
+		t.Errorf("打捞查询词 = %v, 期望含当前意图", asked)
 	}
 	// now 必须被传下去（记忆曲线刷新只认 tick, R8）。
-	if got := a.Context(SiteDispatch, ContextOptions{
+	if got := a.Context(SiteToolRead, ContextOptions{
 		Dredge: func(_ []string, now Tick) []string {
 			if now != a.Now {
 				t.Errorf("打捞收到 tick = %d, 期望 %d", now, a.Now)
@@ -306,35 +312,43 @@ func TestContextDredgeIncluded(t *testing.T) {
 	}
 }
 
-// TestMonologueDoesNotDredge 验证打捞只发生在"要做动作"的调用点。
+// TestDredgeOnlyAtToolRead 验证打捞只在**工具结果轮**发生。
 //
-// 独白是在想，不是在做事：意识流已经把"此刻在想什么"给全了，再捞一遍
-// 旧事只是噪音。更要紧的是打捞**有副作用**（刷新记忆曲线、累计升格次数），
-// 挂在每次装配 prompt 上，等于把每次装配都算成一次"反复想起"——普通群聊
-// 会被迅速顶成事件记忆，记忆层就废了。
-func TestMonologueDoesNotDredge(t *testing.T) {
+// 打捞的用途只有一个：为了行动而回忆。刚读到内容、还没决定怎么回应
+// 的那一刻才需要它——回复一条消息得先想起之前跟这个人聊过什么。
+// 独白是在想、决策点还没拿到内容，两者都不该打捞。
+//
+// 更要紧的是打捞**有副作用**（刷新记忆曲线、累计升格次数）：挂在每次
+// 装配 prompt 上，等于把每次装配都算成一次"反复想起"，普通群聊会被
+// 迅速顶成事件记忆（线上实测过 ~40 tick 就发生）。
+func TestDredgeOnlyAtToolRead(t *testing.T) {
 	a := newTestAgent(t, fakeChatter{})
 	a.appendStreamKind(KindIntent, "把那段代码写完")
+	a.pendingRead = []string{"张三: 周末去看展吗"}
 
-	called := false
+	calls := 0
 	opt := ContextOptions{
 		Dredge: func([]string, Tick) []string {
-			called = true
-			return []string{"不该被捞出来"}
+			calls++
+			return []string{"以前也聊过这个"}
 		},
 	}
-	if got := a.Context(SiteMonologue, opt); strings.Contains(got, "【想起的事】") {
-		t.Errorf("独白不该打捞:\n%s", got)
+	for _, site := range []CallSite{SiteMonologue, SiteDispatch} {
+		got := a.Context(site, opt)
+		if strings.Contains(got, "【想起的事】") {
+			t.Errorf("%s 不该打捞:\n%s", site, got)
+		}
 	}
-	if called {
-		t.Error("独白不该调用打捞函数——它有副作用（刷新强度、累计升格次数）")
+	if calls != 0 {
+		t.Errorf("非工具轮不该调用打捞函数（它有副作用），实际调了 %d 次", calls)
 	}
-	// 动作点则必须打捞——"回复消息需要记忆"就靠这里。
-	if got := a.Context(SiteDispatch, opt); !strings.Contains(got, "【想起的事】") {
-		t.Errorf("决策点应当打捞:\n%s", got)
+
+	got := a.Context(SiteToolRead, opt)
+	if !strings.Contains(got, "【想起的事】以前也聊过这个") {
+		t.Errorf("工具结果轮必须打捞:\n%s", got)
 	}
-	if !called {
-		t.Error("动作点应当调用打捞函数")
+	if calls != 1 {
+		t.Errorf("工具结果轮应当正好调用一次打捞，实际 %d 次", calls)
 	}
 }
 
@@ -505,7 +519,7 @@ func TestLLMFailureLoggedWithCause(t *testing.T) {
 		Logger:  slog.New(slog.NewTextHandler(&buf, nil)),
 	})
 
-	a.absorbLLM(nil) // 空负载：不该 panic
+	a.absorbLLM(context.Background(), nil) // 空负载：不该 panic
 	a.handleEvent(context.Background(), Event{
 		Kind: EventLLMFailed,
 		Data: mustJSON(t, map[string]string{"error": "KeyError: 'unified-model'"}),

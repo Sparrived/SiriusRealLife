@@ -24,6 +24,11 @@ type fakeAttention struct {
 	cursor int
 	// mentions 是"未读里提到我的条数"，供 @ 相关断言使用。
 	mentions int
+	// backlog 是"往上翻"能翻到的更早内容（§2.3 的第二级读取）。
+	// 默认空：多数测试只关心扫描与门控。
+	backlog []string
+	// browsed 记录被翻走过多少条，便于断言"真的读了内容"。
+	browsed int
 }
 
 func (f *fakeAttention) Scan(n int) []string {
@@ -39,7 +44,19 @@ func (f *fakeAttention) Scan(n int) []string {
 	return out
 }
 
-func (f *fakeAttention) Browse(n int) []string { return nil }
+// Browse 从 backlog 由旧到新取 n 条（与真实 Store 一样：翻过就往前走）。
+func (f *fakeAttention) Browse(n int) []string {
+	if n <= 0 || f.browsed >= len(f.backlog) {
+		return nil
+	}
+	end := f.browsed + n
+	if end > len(f.backlog) {
+		end = len(f.backlog)
+	}
+	out := f.backlog[f.browsed:end]
+	f.browsed = end
+	return out
+}
 
 func (f *fakeAttention) Unread() int { return len(f.msgs) - f.cursor }
 
@@ -140,7 +157,7 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 // 测不到东西（永远停在初始状态，却全绿——最坏的一类测试）。
 //
 // 它按 enter_state 的 schema 里给出的候选清单**确定性地**挑一个
-// （用 seed 做下标），因此既走通了真实决策路径，又保持可复现。
+// （用一个递增的下标取，与随机无关），因此既走通了真实决策路径，又保持可复现。
 // 独白调用照旧只回文本。
 //
 // 它会**像一个正常人格那样**响应 Until：prompt 里说"该结束的迹象
@@ -152,7 +169,12 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 // 假 LLM 的任性（比如没睡饱就离开睡觉，然后吃满半天冷却，精力一路
 // 掉到 0）。
 type decidingChatter struct {
-	seed int64
+	// pick 是下一次从候选清单里取第几个（取模）。
+	//
+	// 叫 pick 而不叫 seed：R3 之后框架里**没有随机**，这里只是一个
+	// 递增的下标，用来让假 LLM 的决定可预期。叫 seed 会让人以为随机
+	// 数又回来了。
+	pick int64
 	// turns 记录每次被调用时是决策还是独白，便于断言"确实问了决策"。
 	turns []thinkKind
 }
@@ -192,8 +214,8 @@ func (d *decidingChatter) Chat(_ context.Context, req ChatRequest) (ChatResponse
 			ToolCalls: []ToolCall{{ID: "c1", Name: toolStay, Arguments: json.RawMessage(`{"why":"没得选","for_ticks":5}`)}},
 		}, nil
 	}
-	pick := names[int(d.seed)%len(names)]
-	d.seed++
+	pick := names[int(d.pick)%len(names)]
+	d.pick++
 	args, _ := json.Marshal(map[string]any{"state": pick, "for_ticks": 5, "why": "想换个事做"})
 	return ChatResponse{
 		Text: "换个事做吧",
@@ -229,10 +251,10 @@ func menuFromTools(specs []ToolSpec) []StateName {
 }
 
 // newDecidingAgent 造一个用 decidingChatter 驱动的 agent。
-func newDecidingAgent(t *testing.T, seed int64) *Agent {
+func newDecidingAgent(t *testing.T, pick int64) *Agent {
 	t.Helper()
 	return newTestAgentWith(t, Options{
 		Name: "decider", States: MVPStates(), Initial: "idle",
-		Chatter: &decidingChatter{seed: seed},
+		Chatter: &decidingChatter{pick: pick},
 	})
 }
