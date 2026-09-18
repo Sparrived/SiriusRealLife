@@ -145,8 +145,31 @@ export function stateMeta(name: string): StateMeta {
 
 const API = '/api/v1'
 
+/**
+ * 会话失效时把浏览器送到登录页。
+ *
+ * 必须集中在一处：会话过期后每一个请求都会 401，散在各处判断会漏掉某条
+ * 路径，界面就变成一半报错、一半还在转。用 location.replace 而不是
+ * href，避免用户按后退又回到一个必然 401 的页面。
+ */
+export function gotoLogin(): void {
+  const next = encodeURIComponent(location.pathname + location.search)
+  window.location.replace(`/login?next=${next}`)
+}
+
+/** 会话失效的响应：401（见 transport 的 requireAuth）。 */
+function isUnauthorized(res: Response): boolean {
+  if (res.status !== 401) return false
+  gotoLogin()
+  return true
+}
+
+/** 登出地址（服务端清 cookie 后跳回登录页）。 */
+export const LOGOUT_URL = '/logout'
+
 export async function fetchSnapshot(agentId: string): Promise<Snapshot> {
   const res = await fetch(`${API}/agents/${encodeURIComponent(agentId)}`)
+  if (isUnauthorized(res)) throw new Error('会话已失效，正在跳转登录页')
   if (!res.ok) throw new Error(`状态请求失败：HTTP ${res.status}`)
   return (await res.json()) as Snapshot
 }
@@ -167,6 +190,7 @@ export async function postEvent(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, mentions_me: mentionsMe }),
   })
+  if (isUnauthorized(res)) throw new Error('会话已失效，正在跳转登录页')
   if (!res.ok) {
     const detail = await res.text()
     throw new Error(`投递失败：HTTP ${res.status} ${detail}`)
@@ -206,6 +230,11 @@ export function subscribeStream(agentId: string, handlers: StreamHandlers): () =
 
   es.onopen = () => handlers.onOpen?.()
   es.onerror = () => {
+    // EventSource 不暴露状态码，401 与断网长得一样。探一次快照来区分：
+    // 会话过期时把浏览器送去登录页，而不是让它无限重连。
+    void fetch(`${API}/agents/${encodeURIComponent(agentId)}`).then((res) => {
+      if (res.status === 401) gotoLogin()
+    }).catch(() => {})
     // readyState=CONNECTING 表示 EventSource 正在自动重连；
     // CLOSED 表示它放弃了（例如 4xx），这时必须让用户知道。
     if (es.readyState === EventSource.CLOSED) {

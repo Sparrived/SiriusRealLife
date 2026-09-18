@@ -4,7 +4,7 @@ import ConsciousnessStream from './components/ConsciousnessStream.vue'
 import MemoryPanel from './components/MemoryPanel.vue'
 import MoodMeters from './components/MoodMeters.vue'
 import StateGraph from './components/StateGraph.vue'
-import { postEvent, stateMeta } from './api'
+import { LOGOUT_URL, postEvent, stateMeta } from './api'
 import { useAgent } from './useAgent'
 
 // agent id 固定为 sirius（与 cmd/sirius 的 AgentID 一致）。
@@ -65,6 +65,9 @@ const follow = computed(() => a.conn.value === 'live')
           <i aria-hidden="true" />
           {{ connLabel[a.conn.value] }}
         </span>
+        <!-- 登出走服务端：它清 cookie 再跳回登录页。用普通链接而不是
+             fetch，这样即使 JS 出错也能登出。 -->
+        <a class="logout" :href="LOGOUT_URL">登出</a>
       </div>
     </header>
 
@@ -261,6 +264,23 @@ const follow = computed(() => a.conn.value === 'live')
 
 .conn[data-state='down'] i {
   background: #d4564a;
+}
+
+.logout {
+  font-size: 11px;
+  color: var(--text-faint);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.logout:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.logout:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .banner {
