@@ -210,6 +210,8 @@ type Options struct {
 	SelfModel []string
 	// Dredge 按查询词打捞记忆（memory.md §5.1）。为 nil 则不打捞。
 	//
+	// query 是**自然语言**（意图原句、想法原句），不是切好的关键词：
+	// 切词元由记忆层负责，它才知道待选区里存的是什么。
 	// now 是当前 tick：打捞要刷新记忆曲线，而记忆只认 tick（R8）。
 	Dredge func(query []string, now Tick) []string
 }

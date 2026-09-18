@@ -260,6 +260,11 @@ func (a *Agent) recentMixedLines(n int) []string {
 //
 // 只用意图与最近的想法：它们最贴近"此刻在想什么"，用它们去捞旧记忆
 // 才是联想。刻意不用状态名——"刷手机"这种词捞不出有意义的往事。
+//
+// 传的是**自然语言整句**（不是切好的关键词）：切词元是记忆层的事
+// （memory.Dredge 自己 tokenize），因为只有它知道待选区里存的是什么。
+// 这里曾经假设"调用方负责展开成关键词"，于是整句被拿去做子串匹配，
+// 恒不命中——契约两侧各写各的，合起来线上【想起的事】永远是空的。
 func (a *Agent) dredgeQuery() []string {
 	var q []string
 	if intent := a.Intent(); intent != "" {
