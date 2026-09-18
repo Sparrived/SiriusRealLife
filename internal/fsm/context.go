@@ -49,6 +49,30 @@ func (c CallSite) TaskEnv() string {
 	}
 }
 
+// dredges 报告某个调用点是否应当打捞记忆。
+//
+// **打捞只发生在"要做动作"的调用点**，理由是行为上的：
+//
+//  1. 平时不需要。意识流已经把"此刻在想什么"给全了（【刚发生】
+//     【最近在想】【打算】），闲着再捞一遍旧事只是噪音。
+//  2. 打捞**有副作用**：刷新记忆曲线、累计升格次数（memory.md §4/§5.3）。
+//     若挂在每次装配 prompt 上，等于把每次装配都算成一次"反复想起"，
+//     普通群聊会被迅速顶成事件记忆，记忆层就废了。
+//
+// 真实场景是"看 QQ 之后要回复"——那正是 SiteToolRead 的位置（读了 app
+// 内容、准备做动作）。决策点同样需要回忆（"上周说好要交周报"才会决定去
+// 干活），所以它也打捞。独白不打捞：它只是在想，不在做。
+//
+// 新增调用点时必须显式回答这个问题：它是要做动作，还是只是在想？
+func (c CallSite) dredges() bool {
+	switch c {
+	case SiteDispatch, SiteToolRead:
+		return true
+	default:
+		return false
+	}
+}
+
 // ContextLimits 是上下文各段落的条数上限。
 //
 // 每段都必须有上限：这是 R5（意识流必须有界）在 prompt 侧的落点，
@@ -80,6 +104,9 @@ type ContextOptions struct {
 	SelfModel []string
 	// Dredge 按查询词打捞记忆（memory.md §5.1）。为 nil 则不打捞。
 	//
+	// 它只是**提供打捞的能力**，打不打由调用点决定（见 CallSite.dredges）：
+	// 只有要做动作的调用点才打捞，独白不打捞。
+	//
 	// 带上 now：打捞要刷新记忆曲线，而记忆只认 tick（R8）。
 	// 让调用方传而不是在装配处闭包捕获，是因为 agent 构造时
 	// 还没有自己的 tick —— 闭包捕获会拿到一个永远为 0 的值。
@@ -97,7 +124,7 @@ type ContextOptions struct {
 //	【最近在想】KindThought
 //	【刚发生】KindObservation + KindAction
 //	【打算】最近一条 KindIntent
-//	【想起的事】打捞结果
+//	【想起的事】打捞结果（只在要做动作的调用点出现，见 dredges）
 //	【适合做】当前状态的 Suggests
 //
 // 只能在 agent 自己的 goroutine 里调用（R1）。
@@ -154,8 +181,8 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 	}
 
 	// 想起的事：按调用点的查询词打捞（memory.md §5.1）。
-	// 查询词用当前状态名 + 意图 + 最近的词，让打捞与"此刻"相关。
-	if opt.Dredge != nil {
+	// 查询词是意图 + 最近的想法——用"此刻在想什么"去捞旧记忆才是联想。
+	if opt.Dredge != nil && site.dredges() {
 		if hit := opt.Dredge(a.dredgeQuery(), a.Now); len(hit) > 0 {
 			if len(hit) > opt.Limits.Dredged {
 				hit = hit[:opt.Limits.Dredged]

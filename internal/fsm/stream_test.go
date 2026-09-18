@@ -280,7 +280,7 @@ func TestContextDredgeIncluded(t *testing.T) {
 	a.appendStreamKind(KindIntent, "把那段代码写完")
 
 	var asked []string
-	got := a.Context(SiteMonologue, ContextOptions{
+	got := a.Context(SiteDispatch, ContextOptions{
 		Dredge: func(query []string, now Tick) []string {
 			asked = query
 			return []string{"上周也差不多是这个进度"}
@@ -294,7 +294,7 @@ func TestContextDredgeIncluded(t *testing.T) {
 		t.Errorf("打捞查询词 = %v, 期望首项是当前意图", asked)
 	}
 	// now 必须被传下去（记忆曲线刷新只认 tick, R8）。
-	if got := a.Context(SiteMonologue, ContextOptions{
+	if got := a.Context(SiteDispatch, ContextOptions{
 		Dredge: func(_ []string, now Tick) []string {
 			if now != a.Now {
 				t.Errorf("打捞收到 tick = %d, 期望 %d", now, a.Now)
@@ -303,6 +303,38 @@ func TestContextDredgeIncluded(t *testing.T) {
 		},
 	}); got == "" {
 		t.Fatal("上下文为空")
+	}
+}
+
+// TestMonologueDoesNotDredge 验证打捞只发生在"要做动作"的调用点。
+//
+// 独白是在想，不是在做事：意识流已经把"此刻在想什么"给全了，再捞一遍
+// 旧事只是噪音。更要紧的是打捞**有副作用**（刷新记忆曲线、累计升格次数），
+// 挂在每次装配 prompt 上，等于把每次装配都算成一次"反复想起"——普通群聊
+// 会被迅速顶成事件记忆，记忆层就废了。
+func TestMonologueDoesNotDredge(t *testing.T) {
+	a := newTestAgent(t, fakeChatter{})
+	a.appendStreamKind(KindIntent, "把那段代码写完")
+
+	called := false
+	opt := ContextOptions{
+		Dredge: func([]string, Tick) []string {
+			called = true
+			return []string{"不该被捞出来"}
+		},
+	}
+	if got := a.Context(SiteMonologue, opt); strings.Contains(got, "【想起的事】") {
+		t.Errorf("独白不该打捞:\n%s", got)
+	}
+	if called {
+		t.Error("独白不该调用打捞函数——它有副作用（刷新强度、累计升格次数）")
+	}
+	// 动作点则必须打捞——"回复消息需要记忆"就靠这里。
+	if got := a.Context(SiteDispatch, opt); !strings.Contains(got, "【想起的事】") {
+		t.Errorf("决策点应当打捞:\n%s", got)
+	}
+	if !called {
+		t.Error("动作点应当调用打捞函数")
 	}
 }
 
