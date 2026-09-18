@@ -38,7 +38,9 @@ func (f fakeChatter) Chat(ctx context.Context, _ fsm.ChatRequest) (fsm.ChatRespo
 // 假 LLM 会让 agent 永远停在初始状态——"30 tick 内必须发生转移"
 // 这类验收就测不到东西。它按候选清单确定性地点菜，保持可复现。
 type decidingChatter struct {
-	seed int64
+	// pick 是下一次从候选清单里取第几个（取模）。叫 pick 不叫 seed：
+	// R3 之后框架里没有随机，这只是一个递增的下标。
+	pick int64
 }
 
 func (d *decidingChatter) Chat(_ context.Context, req fsm.ChatRequest) (fsm.ChatResponse, error) {
@@ -56,8 +58,8 @@ func (d *decidingChatter) Chat(_ context.Context, req fsm.ChatRequest) (fsm.Chat
 			}},
 		}, nil
 	}
-	pick := names[int(d.seed)%len(names)]
-	d.seed++
+	pick := names[int(d.pick)%len(names)]
+	d.pick++
 	args, _ := json.Marshal(map[string]any{
 		"state": pick, "for_ticks": 5, "why": "想换个事做",
 	})
@@ -226,7 +228,7 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 // TestAcceptance30Ticks 跑 30 tick，核对验收 1/2/4：
 // 不自锁、不死循环、同状态不连续进入、每次决定都有完整结构化日志。
 func TestAcceptance30Ticks(t *testing.T) {
-	h := newHarness(t, "idle", &decidingChatter{seed: 3})
+	h := newHarness(t, "idle", &decidingChatter{pick: 3})
 	ctx := context.Background()
 
 	// 推进 30 tick。循环条件用 Now 而不是固定次数：settle 为了让
@@ -281,6 +283,13 @@ func TestAcceptance30Ticks(t *testing.T) {
 //
 // 决策与独白都异步（R4），测试直接调 Step 时必须自己把结果事件
 // drain 掉，否则状态永远停在原处、断言看到的是零值。
+//
+// ⚠️ 它**会推进 tick**：acceptance 是外部包，够不到内部的 drainEvents，
+// 只能靠 Step 来收结果事件，而 Step 一定让时间前进。循环里 Step 几次
+// 取决于 LLM 何时回话，所以**每次 settle 推进的 tick 数是不定的**。
+// 要断言"同一串状态"的测试不能用它，那类测试放在 fsm 包内
+// （能同步 drain，见 TestStatePathIsReproducible）；这里只做
+// "看最终效果"的断言，与 tick 的具体对齐无关。
 func settle(t *testing.T, h *harness, ctx context.Context) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -292,42 +301,6 @@ func settle(t *testing.T, h *harness, ctx context.Context) {
 		time.Sleep(time.Millisecond)
 	}
 	h.agent.Step(ctx)
-}
-
-// TestAcceptanceReproducibleFromDecisions 验证可复现性的新来源。
-//
-// 旧版是"同种子同输入"（R3 的 *rand.Rand）。现在**没有随机**，复现性
-// 来自"决定由 LLM 给出、理由落进日志"：同一个假 LLM 必须产生同一串
-// 状态，并且每一步都能在日志里查到当时的选择与理由。
-func TestAcceptanceReproducibleFromDecisions(t *testing.T) {
-	run := func() ([]string, int) {
-		h := newHarness(t, "idle", &decidingChatter{seed: 11})
-		ctx := context.Background()
-		var path []string
-		for i := 0; i < 120; i++ {
-			h.agent.Step(ctx)
-			settle(t, h, ctx)
-			path = append(path, string(h.agent.Current))
-		}
-		return path, len(h.logs.decisions())
-	}
-	a, alog := run()
-	b, blog := run()
-	if len(a) != len(b) {
-		t.Fatalf("两次运行长度不同: %d vs %d", len(a), len(b))
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			t.Fatalf("第 %d 步状态不同: %s vs %s（决定必须可复现）", i, a[i], b[i])
-		}
-	}
-	// 可复现性必须**有据可查**：日志条数也要一致，且不能为空。
-	if alog == 0 {
-		t.Fatal("没有任何决策日志：状态在动却查不到理由")
-	}
-	if alog != blog {
-		t.Errorf("两次运行的决策条数不同: %d vs %d", alog, blog)
-	}
 }
 
 // TestAcceptanceLLMDoesNotBlockTick 验收 3：LLM 调用期间状态机不被阻塞，

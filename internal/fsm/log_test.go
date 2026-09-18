@@ -34,7 +34,7 @@ func captureLogs(t *testing.T, n int) []decisionRecord {
 
 	a, err := New(Options{
 		Name: "test", States: MVPStates(),
-		Chatter: &decidingChatter{seed: 20240101},
+		Chatter: &decidingChatter{pick: 20240101},
 		Logger:  logger, Initial: "idle",
 	})
 	if err != nil {
@@ -157,7 +157,7 @@ func TestDecisionLogHasCandidateSnapshot(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	a, err := New(Options{
 		Name: "test", States: MVPStates(),
-		Chatter: &decidingChatter{seed: 7},
+		Chatter: &decidingChatter{pick: 7},
 		Logger:  logger, Initial: "idle",
 	})
 	if err != nil {
@@ -481,4 +481,72 @@ func TestSleepIsNotChronic(t *testing.T) {
 	// 注意：这里**刻意不断言** sleeps > 0。睡觉现在是 LLM 的选择，
 	// 一个假 LLM 完全可能一天都不选它——那不代表框架坏了。
 	// 旧版本这条断言依赖随机抽取必然踩到 sleeping，已经失去意义。
+}
+
+// TestStatePathIsReproducible 验证可复现性的新来源。
+//
+// 旧版是"同种子同输入"（R3 的 *rand.Rand）。现在**没有随机**，复现性
+// 来自"决定由 LLM 给出、理由落进日志"：同一个假 LLM 必须产生同一串
+// 状态，并且每一步都能在日志里查到当时的选择与理由。
+//
+// 为什么这条测试在 fsm 包内而**不是** acceptance：acceptance 是外部包，
+// 够不到 drainEvents，只能靠 Step 收结果事件——而 Step 一定推进 tick，
+// 于是"等一次调用落定"会顺带推进未知个 tick，路径就取决于 LLM 何时
+// 回话（实测在 `go test ./...` 的负载下随机失败，第 0/84/102 步都出现过）。
+// 包内可以用 waitIdle 同步 drain：**等调用落定不推进时间**，tick 数是
+// 确定的，这个断言才成立。
+func TestStatePathIsReproducible(t *testing.T) {
+	run := func() ([]string, int) {
+		var buf bytes.Buffer
+		a, err := New(Options{
+			Name: "test", States: MVPStates(), Initial: "idle",
+			Chatter: &decidingChatter{pick: 11},
+			Logger:  slog.New(slog.NewJSONHandler(&buf, nil)),
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := context.Background()
+		var path []string
+		for i := 0; i < 120; i++ {
+			stepSync(t, a, ctx)
+			path = append(path, string(a.Current))
+		}
+		n := 0
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if strings.Contains(line, `"msg":"state_decision"`) {
+				n++
+			}
+		}
+		return path, n
+	}
+
+	a, alog := run()
+	b, blog := run()
+	if len(a) != len(b) {
+		t.Fatalf("两次运行长度不同: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("第 %d 步状态不同: %s vs %s（决定必须可复现）", i, a[i], b[i])
+		}
+	}
+	// 可复现性必须**有据可查**：每个状态都能在日志里查到理由。
+	if alog == 0 {
+		t.Fatal("没有任何决策日志：状态在动却查不到理由")
+	}
+	if alog != blog {
+		t.Errorf("两次运行的决策条数不同: %d vs %d", alog, blog)
+	}
+	// 同一串状态必须真的动过，否则"可复现"是废话。
+	moved := false
+	for i := 1; i < len(a); i++ {
+		if a[i] != a[i-1] {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		t.Fatal("120 tick 内状态一次都没变，这条测试没在测什么")
+	}
 }
