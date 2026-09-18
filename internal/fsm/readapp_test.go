@@ -142,13 +142,13 @@ func TestReadAppDefersUntilContentIsSeen(t *testing.T) {
 		t.Errorf("打捞查询词应含刚读到的内容，实际 %v", queries[0])
 	}
 
-	// 决策最终落地，且"读"留下的痕迹已清干净。
+	// 决策最终落地，且"刚读到的内容"已清干净（它是**这一次询问**的东西；
+	// 读的次数预算按驻留算，不在这里清，由 TestReadAppIsBounded 守）。
 	if a.LastRecord().Reason == "" {
 		t.Fatal("读完内容后应当重新问一次并做出决定")
 	}
-	if len(a.pendingRead) != 0 || a.readApps != 0 {
-		t.Errorf("决策落地后应清空读的痕迹：pendingRead=%v readApps=%d",
-			a.pendingRead, a.readApps)
+	if len(a.pendingRead) != 0 {
+		t.Errorf("决策落地后应清空 pendingRead，实际 %v", a.pendingRead)
 	}
 }
 
@@ -310,8 +310,19 @@ func TestReadAppIsBounded(t *testing.T) {
 	if a.LastRecord().Reason == "" {
 		t.Fatal("超预算后仍必须做出决定（降级为 stay），不能卡住")
 	}
+	// 预算按**驻留**算：几次 stay 之后仍然耗尽，不能因为重新决策就回血
+	// ——线上实测过按决策算会变成"决定→翻→没捞到→决定→再翻"的死循环
+	// （50 tick 烧掉 24 次调用，行为上也像个强迫症）。
+	if a.readApps != maxReadApps {
+		t.Errorf("预算应被耗尽且不因重新决策而回血，实际 %d（上限 %d）",
+			a.readApps, maxReadApps)
+	}
+	// 换状态才重置：新的一次驻留可以重新翻。
+	if err := a.commitEnter("working", 5, "换个事做"); err != nil {
+		t.Fatalf("commitEnter: %v", err)
+	}
 	if a.readApps != 0 {
-		t.Errorf("决策落地后预算应清零，实际 %d", a.readApps)
+		t.Errorf("换状态后预算应重置，实际 %d", a.readApps)
 	}
 }
 

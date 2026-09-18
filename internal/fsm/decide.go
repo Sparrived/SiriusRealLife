@@ -52,11 +52,16 @@ const (
 	toolReadApp = "read_app"
 )
 
-// maxReadApps 是**一次决策里**最多允许读几次 app。
+// maxReadApps 是**一次驻留里**最多允许读几次 app。
 //
-// 必须有界：模型可以一直说"再翻一点"，而每读一次要多花两次
-// LLM 调用（工具结果轮 + 重问决策）。超出后 read_app 被忽略，
-// 模型只能从剩下的选择里挑，或降级为 stay。
+// 必须有界：模型可以一直说"再翻一点"，而每读一次要多花两次 LLM 调用
+// （工具结果轮 + 重问决策）。超出后 read_app 被忽略，模型只能从剩下的
+// 选择里挑，或降级为 stay。
+//
+// 按**驻留**而不是按一次决策算：线上实测过按决策算会失效——每次
+// `stay` 都把预算清零，于是模型"决定→翻一遍→没捞到→决定→再翻一遍"
+// 无限循环，50 tick 内烧掉 24 次调用，行为上也像个强迫症。
+// 换了状态再回来是新的驻留，可以重新翻。
 const maxReadApps = 2
 
 // 单次翻页的条数：默认值与硬上限。
@@ -312,7 +317,7 @@ func (a *Agent) commitStay(want Tick, why string) {
 	// 条件随即变假，risingEdge 会在下个 tick 自动重新武装。
 	a.decideAt = a.Now + ticks
 	a.pending = nil
-	a.endReadEpisode()
+	a.pendingRead = nil
 	a.lastRecord = a.stayRecord(why, ticks)
 	a.logDecision(a.lastRecord)
 }
@@ -331,19 +336,11 @@ func (a *Agent) commitEnter(name StateName, want Tick, why string) error {
 	}
 	ticks := a.clampTicks(name, want)
 	a.pending = nil
-	a.endReadEpisode()
-	a.enter(name, "llm", why, ticks)
-	return nil
-}
-
-// endReadEpisode 清掉"先看一眼"这一轮留下的痕迹。
-//
-// 一次决策在这里真正结束时才调用（commitStay / commitEnter）：
-// 读的次数预算与刚读到的内容都属于**这一次询问**，跨决策留着
-// 会让下次的 read_app 预算凭空少一次、打捞查询词带上过期内容。
-func (a *Agent) endReadEpisode() {
+	// 换状态 = 离开这一次驻留：翻页预算跟着重置。
 	a.readApps = 0
 	a.pendingRead = nil
+	a.enter(name, "llm", why, ticks)
+	return nil
 }
 
 // applyDecision 处理一次决策调用回来的结果。
