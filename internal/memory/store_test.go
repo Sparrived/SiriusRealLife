@@ -526,3 +526,73 @@ func TestTokenizeBasics(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordJoinsCurrentSession 验证"她说过的话"进记忆，且**归入同一次翻阅**。
+//
+// 这是"说出去的话肯定要进"的落点，而且必须进**同一段**：她看到的话与她
+// 回的话属于同一段情节记忆。拆成两段，"那你去吧"式的指代就重新失去上下文
+// ——而"打捞返回整段"的全部理由正是防止这种指代失义。
+func TestRecordJoinsCurrentSession(t *testing.T) {
+	s := newStore()
+	s.Tick(100)
+	s.Ingest(Message{From: "张三", Text: "周末去看展吗"})
+	s.Scan(5)
+
+	s.Tick(102)
+	s.Record("回张三：周末我有空")
+
+	got := s.Staging()
+	if len(got) != 2 {
+		t.Fatalf("应有 2 条待选区条目（看到 1 条 + 说 1 条），实际 %d", len(got))
+	}
+	if got[0].Session != got[1].Session {
+		t.Errorf("她的话应与看到的内容属于同一次翻阅：%d != %d",
+			got[0].Session, got[1].Session)
+	}
+	// 整段返回时，两句话都要在——这才是完整的一段对话。
+	seg := s.Dredge([]string{"看展"}, 110)
+	if len(seg) != 1 {
+		t.Fatalf("应返回 1 段，实际 %d", len(seg))
+	}
+	if !strings.Contains(seg[0], "周末去看展吗") {
+		t.Errorf("整段里缺对方那句：%q", seg[0])
+	}
+	if !strings.Contains(seg[0], "周末我有空") {
+		t.Errorf("整段里缺她自己那句（说出去的话必须进记忆）：%q", seg[0])
+	}
+}
+
+// TestRecordImportanceBelowMention 验证自己说的话的重要性定位：
+// 高于灌水，低于"专门叫我"。
+func TestRecordImportanceBelowMention(t *testing.T) {
+	s := newStore()
+	s.Tick(1)
+	s.Ingest(Message{From: "王五", Text: "@你 在吗", MentionsMe: true})
+	s.Scan(5)
+	s.Record("回王五：在的")
+
+	var own, mention int
+	for _, e := range s.Staging() {
+		if strings.Contains(e.Text, "在的") {
+			own = e.Importance
+		} else {
+			mention = e.Importance
+		}
+	}
+	if own >= mention {
+		t.Errorf("自己说的话(%d)不该压过别人专门叫我(%d)", own, mention)
+	}
+	if own <= 2 {
+		t.Errorf("自己说的话(%d)不该与水群同分（2）", own)
+	}
+}
+
+// TestRecordIgnoresEmpty 验证空白不写入。
+func TestRecordIgnoresEmpty(t *testing.T) {
+	s := newStore()
+	s.Record("   ")
+	s.Record("")
+	if got := len(s.Staging()); got != 0 {
+		t.Fatalf("空白不该写入待选区，实际 %d 条", got)
+	}
+}

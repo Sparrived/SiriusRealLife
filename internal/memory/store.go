@@ -416,6 +416,33 @@ func (s *Store) appendEntryLocked(session SessionID, text string, keywords []str
 	return e
 }
 
+// Record 把"她说过的话"写入待选区（§5.1：说出去的话也进记忆）。
+//
+// 与 Scan/Browse 的自动写入不同，这是**显式**写入：内容不来自外部消息，
+// 而来自她自己。由 fsm 的 Recorder 缝口调用。
+//
+// 会话沿用**当前那次翻阅**：她看到的话与她回的话属于同一段情节记忆，
+// 拆成两段会让"那你去吧"式的指代重新失去上下文——而"整段返回"的整个
+// 理由就是防止这种指代失义。
+//
+// 不接收 tick 参数：本包的时钟只由 Tick 驱动（R8），从外面塞一个 tick
+// 进来会与衰减/升格用的时间对不上。
+func (s *Store) Record(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendEntryLocked(s.sessionForLocked(), text, []string{text}, ownWordsImportance, s.now)
+}
+
+// ownWordsImportance 是"自己说过的话"的重要性。
+//
+// 6：高于普通灌水（2），低于 @ 我（8）。她说的话比水群值得记，
+// 但不该压过别人专门叫她——那才是更该被留住的事。
+const ownWordsImportance = 6
+
 // NewSession 分配一个新的翻阅会话 ID。
 func (s *Store) NewSession() SessionID {
 	s.mu.Lock()

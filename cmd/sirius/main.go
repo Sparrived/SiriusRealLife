@@ -82,6 +82,9 @@ func run() error {
 		MonologueEvery: opt.MonologueEvery,
 		// 打捞把长期记忆接回 prompt（memory.md §5.1）。
 		Dredge: store.DredgeFor(),
+		// 她说过的话也进记忆（§5.1）："我说过什么"与"我听到什么"
+		// 一样是情节记忆，缺一半那段对话就只剩对方在自言自语。
+		Recorder: store,
 	})
 	if err != nil {
 		return err
