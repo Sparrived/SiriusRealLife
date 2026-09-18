@@ -204,6 +204,8 @@ func newHarness(t *testing.T, initial fsm.StateName, chatter fsm.Chatter) *harne
 		Monologue:      true,
 		MonologueEvery: -1,
 		Dredge:         store.DredgeFor(),
+		// 她说过的话也进记忆（§5.1）。
+		Recorder: store,
 	})
 	if err != nil {
 		t.Fatalf("fsm.New: %v", err)
