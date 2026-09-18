@@ -16,6 +16,12 @@ type thinkKind string
 const (
 	thinkMonologue thinkKind = "monologue"
 	thinkDecision  thinkKind = "decision"
+	// thinkToolRead 是工具结果轮：把刚读到的内容连同打捞回来的记忆
+	// 一起交给模型，让它读懂并想好怎么回应。
+	//
+	// 它**不改状态**（不带状态工具），只写意识流；随后框架会重新问
+	// 一次状态决策（memory.md §5.1）。
+	thinkToolRead thinkKind = "tool_read"
 )
 
 // llmResult 是一次 LLM 调用回来的结果（事件负载）。

@@ -159,6 +159,16 @@ type Agent struct {
 	selfModel []string
 	// dredge 按查询词打捞记忆（memory.md §5.1）。
 	dredge func(query []string, now Tick) []string
+
+	// readApps 是**本次决策**里已经读过几次 app（read_app 的预算，
+	// 见 maxReadApps）。由 endReadEpisode 在决策真正结束时清零。
+	readApps int
+	// pendingRead 是刚刚读到的那批内容，供工具结果轮打捞时当查询词。
+	//
+	// 单独存一份而不是回头扫意识流：意识流是**有界**的（R5），
+	// 刚读到的内容可能已被挤掉；而且打捞要的正是"这一次读到的"，
+	// 从日志里反推需要额外的边界判断。
+	pendingRead []string
 }
 
 // Options 是构造 Agent 的参数。
@@ -557,7 +567,7 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 	case EventLLMDone:
 		a.settleThinking()
 		a.CallCount++
-		a.absorbLLM(ev.Data)
+		a.absorbLLM(ctx, ev.Data)
 	case EventLLMFailed:
 		a.settleThinking()
 		// 失败原因必须进结构化日志，**不能**只留在意识流里。
@@ -585,7 +595,6 @@ func (a *Agent) handleEvent(ctx context.Context, ev Event) {
 	default:
 		a.log.Warn("unknown_event", slog.String("kind", string(ev.Kind)))
 	}
-	_ = ctx
 }
 
 // ingestMessage 把外部消息交给记忆层。
@@ -639,7 +648,7 @@ func llmError(data json.RawMessage) string {
 //
 // 分类在这里而不是在 think 里：结果必须回到 agent 自己的 goroutine
 // 才能改状态（R1），分发是 agent 的事。
-func (a *Agent) absorbLLM(data json.RawMessage) {
+func (a *Agent) absorbLLM(ctx context.Context, data json.RawMessage) {
 	var res llmResult
 	if len(data) > 0 {
 		_ = json.Unmarshal(data, &res)
@@ -651,11 +660,19 @@ func (a *Agent) absorbLLM(data json.RawMessage) {
 	}
 	switch res.Kind {
 	case thinkDecision:
-		a.applyDecision(res)
+		a.applyDecision(ctx, res)
 	case thinkMonologue:
 		// 独白只写意识流，不改状态。已经由 absorbNarration 处理。
 		if strings.TrimSpace(res.Text) == "" {
 			a.appendStreamKind(KindObservation, "想了半天，没想出什么")
+		}
+	case thinkToolRead:
+		// 工具结果轮：内容与记忆都已经由 absorbNarration 写进意识流。
+		// 这里什么都不用做——**刻意不改状态**，也不 commit。
+		// pending 仍非空且已无在途调用，所以本 tick 稍后的 consider
+		// 会自动重新问一次状态决策（那时内容已在【刚发生】里）。
+		if strings.TrimSpace(res.Text) == "" {
+			a.appendStreamKind(KindThought, "看明白了，但一时说不上来")
 		}
 	default:
 		a.log.Warn("llm_result_unknown_kind", slog.String("kind", string(res.Kind)))

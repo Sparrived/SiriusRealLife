@@ -51,26 +51,20 @@ func (c CallSite) TaskEnv() string {
 
 // dredges 报告某个调用点是否应当打捞记忆。
 //
-// **打捞只发生在"要做动作"的调用点**，理由是行为上的：
+// **只有工具结果轮打捞**——"模型刚读到它要的内容、还没决定怎么回应"
+// 那一刻。打捞的用途只有一个：**为了行动而回忆**。要回复一条消息，
+// 得先想起之前跟这个人聊过什么；而这件事只有在内容已经摆在眼前时
+// 才说得清，查询词也才有的放矢（用刚读到的内容去捞，见 dredgeQuery）。
 //
-//  1. 平时不需要。意识流已经把"此刻在想什么"给全了（【刚发生】
-//     【最近在想】【打算】），闲着再捞一遍旧事只是噪音。
-//  2. 打捞**有副作用**：刷新记忆曲线、累计升格次数（memory.md §4/§5.3）。
-//     若挂在每次装配 prompt 上，等于把每次装配都算成一次"反复想起"，
-//     普通群聊会被迅速顶成事件记忆，记忆层就废了。
+// 反过来，闲着不打捞：意识流已经把"此刻在想什么"给全了（【刚发生】
+// 【最近在想】【打算】），再捞一遍旧事只是噪音。更要紧的是打捞**有副作用**
+// （刷新记忆曲线、累计升格次数），挂在每次装配 prompt 上等于把每次装配
+// 都算成一次"反复想起"，普通群聊会被迅速顶成事件记忆。
 //
-// 真实场景是"看 QQ 之后要回复"——那正是 SiteToolRead 的位置（读了 app
-// 内容、准备做动作）。决策点同样需要回忆（"上周说好要交周报"才会决定去
-// 干活），所以它也打捞。独白不打捞：它只是在想，不在做。
-//
-// 新增调用点时必须显式回答这个问题：它是要做动作，还是只是在想？
+// 新增调用点时必须显式回答：它拿到的是**刚读到的内容**，还是只是在想？
+// 只有前者才打捞。
 func (c CallSite) dredges() bool {
-	switch c {
-	case SiteDispatch, SiteToolRead:
-		return true
-	default:
-		return false
-	}
+	return c == SiteToolRead
 }
 
 // ContextLimits 是上下文各段落的条数上限。
@@ -183,7 +177,7 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 	// 想起的事：按调用点的查询词打捞（memory.md §5.1）。
 	// 查询词是意图 + 最近的想法——用"此刻在想什么"去捞旧记忆才是联想。
 	if opt.Dredge != nil && site.dredges() {
-		if hit := opt.Dredge(a.dredgeQuery(), a.Now); len(hit) > 0 {
+		if hit := opt.Dredge(a.dredgeQuery(site), a.Now); len(hit) > 0 {
 			if len(hit) > opt.Limits.Dredged {
 				hit = hit[:opt.Limits.Dredged]
 			}
@@ -221,7 +215,16 @@ func (a *Agent) Context(site CallSite, opt ContextOptions) string {
 		b.WriteString("先说你此刻在想什么（一两句、第一人称、口语），再调工具。")
 		b.WriteString("\n只有你自己能做这个决定：不想换就调 stay，觉得该做别的了就调 enter_state。")
 	case SiteToolRead:
-		b.WriteString("\n把上面的结果用一句话说成人话。")
+		// 这一轮**不带状态工具**：它只负责"读懂 + 想好怎么回应"。
+		// 状态决策随后由框架重新问一次（见 applyDecision 的 read_app 分支），
+		// 这样一次决定只改一次状态（R11）。
+		fmt.Fprintf(&b, "\n【%s】上面【刚发生】里就是你刚翻到的内容。\n", toolReadHint)
+		// 措辞刻意**不出现**「想起的事」这个段落标题：它只应在真的捞到
+		// 东西时出现。指令里若也写一遍，任何按标题判断"记忆有没有注入"
+		// 的测试都会永远为真——这条已经踩过一次。
+		b.WriteString("结合你还记得的旧事，把它读明白：这是在说什么、跟你有什么关系。\n")
+		b.WriteString("然后说一句你打算怎么办（回不回、怎么回、还是先记着）。")
+		b.WriteString("只说此刻的想法和打算，一两句、第一人称、口语。")
 	}
 
 	return b.String()
@@ -283,17 +286,31 @@ func (a *Agent) recentMixedLines(n int) []string {
 	return reverse(out)
 }
 
+// toolReadHint 是工具结果轮里固定出现的一句话。
+//
+// 与 untilHint 同样的理由：测试的假 LLM 跑在另一个 goroutine 上，
+// 只能按 **prompt 文本** 判断"这是哪一轮"（R1）。两处引用同一个常量，
+// 改文案不会让测试静默失效。
+const toolReadHint = "刚翻到的"
+
 // dredgeQuery 组装打捞查询词。
 //
-// 只用意图与最近的想法：它们最贴近"此刻在想什么"，用它们去捞旧记忆
-// 才是联想。刻意不用状态名——"刷手机"这种词捞不出有意义的往事。
+// 工具结果轮用的是**刚读到的内容**——要回忆的是"这段内容让我想起什么"，
+// 而不是泛泛的"我在想什么"。这正是打捞只发生在这一轮的理由：
+// 内容已经在眼前，查询词才有的放矢（§5.1）。
+// 再补上意图与最近的想法，让联想不完全被眼前这条消息绑架。
+//
+// 刻意不用状态名——"刷手机"这种词捞不出有意义的往事。
 //
 // 传的是**自然语言整句**（不是切好的关键词）：切词元是记忆层的事
 // （memory.Dredge 自己 tokenize），因为只有它知道待选区里存的是什么。
 // 这里曾经假设"调用方负责展开成关键词"，于是整句被拿去做子串匹配，
 // 恒不命中——契约两侧各写各的，合起来线上【想起的事】永远是空的。
-func (a *Agent) dredgeQuery() []string {
+func (a *Agent) dredgeQuery(site CallSite) []string {
 	var q []string
+	if site == SiteToolRead {
+		q = append(q, a.pendingRead...)
+	}
 	if intent := a.Intent(); intent != "" {
 		q = append(q, intent)
 	}

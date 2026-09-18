@@ -39,6 +39,30 @@ type Trigger struct {
 const (
 	toolStay       = "stay"
 	toolEnterState = "enter_state"
+	// toolReadApp 是"先看看手机上的内容"。
+	//
+	// 它**不改状态**：调用它等于对框架说"我信息不够，先看一眼再决定"。
+	// 框架于是读内容 → 写入意识流与待选区 → 用刚读到的内容打捞记忆
+	// → 发起一轮工具结果调用（SiteToolRead，只负责读懂与回应）
+	// → 然后**重新问一次**状态决策。
+	//
+	// 为什么读的回合要单独一次调用：那一轮才需要记忆。回复一条消息
+	// 依赖"之前聊过什么"，而这只有在内容已经摆在眼前时才说得清
+	// （memory.md §5.1 的"打捞只在要做动作的调用点发生"）。
+	toolReadApp = "read_app"
+)
+
+// maxReadApps 是**一次决策里**最多允许读几次 app。
+//
+// 必须有界：模型可以一直说"再翻一点"，而每读一次要多花两次
+// LLM 调用（工具结果轮 + 重问决策）。超出后 read_app 被忽略，
+// 模型只能从剩下的选择里挑，或降级为 stay。
+const maxReadApps = 2
+
+// 单次翻页的条数：默认值与硬上限。
+const (
+	defaultReadAppLimit = 10
+	maxReadAppLimit     = 30
 )
 
 // untilHint 是"状态该结束了"这条理由里固定出现的一句话。
@@ -149,13 +173,25 @@ func (a *Agent) consider(ctx context.Context) {
 	}
 	req := ChatRequest{
 		Prompt: a.Context(SiteDispatch, a.contextOptions()),
-		Tools:  decisionTools(a.Current, a.survey()),
+		Tools:  a.decisionTools(),
 	}
 	if err := a.think(ctx, req, thinkDecision); err != nil {
 		// 起不来（没配 Chatter）。降级为"原样再待一会"。
 		a.log.Warn("decision_not_started", "err", err.Error())
 		a.commitStay(defaultStayTick, "没想出来，先按原样待着")
 	}
+}
+
+// decisionTools 组装一个状态决策点可用的全部工具。
+//
+// 候选状态与 read_app 在两个地方分别构造：前者只依赖状态表，
+// 后者还依赖"当前状态看不看得见东西"，混在一起会让纯函数变脏。
+func (a *Agent) decisionTools() []ToolSpec {
+	tools := decisionTools(a.Current, a.survey())
+	if t := a.readAppTool(); t != nil {
+		tools = append(tools, *t)
+	}
+	return tools
 }
 
 // decisionTools 声明决策可用的工具。
@@ -211,6 +247,38 @@ func decisionTools(current StateName, survey []Candidate) []ToolSpec {
 	}
 }
 
+// readAppTool 声明"翻开手机先看看"这个工具，**仅当当前状态看得到东西时**。
+//
+// 返回 nil 表示不提供它——例如睡觉时不订阅任何通道，翻开手机也没内容可看。
+// 这是 R7 修订的落点：被门控的是**信息可见性**，不是工具白名单；
+// 但看不见信息的场合下把这个工具摆出来，只会诱使模型点一个空动作。
+func (a *Agent) readAppTool() *ToolSpec {
+	apps := a.visibleApps()
+	if len(apps) == 0 {
+		return nil
+	}
+	enumJSON, _ := json.Marshal(apps)
+	params := fmt.Sprintf(
+		`{"type":"object","properties":{"app":{"type":"string","enum":%s,"description":"看哪个 app"},"n":{"type":"integer","description":"看多少条，默认 %d"}},"required":["app"],"additionalProperties":false}`,
+		string(enumJSON), defaultReadAppLimit)
+	return &ToolSpec{
+		Name: toolReadApp,
+		Description: "翻开手机上的 app 看内容（往上翻更早的聊天）。" +
+			"信息不够、想先看一眼再决定的时候用它；我会把内容摆到你眼前，" +
+			"并把你以前的相关记忆一起想起来，然后重新问你要做什么。",
+		Parameters: json.RawMessage(params),
+	}
+}
+
+// visibleApps 返回当前状态能读到的 app 名（就是它订阅的通道）。
+func (a *Agent) visibleApps() []string {
+	var out []string
+	for _, c := range a.states[a.Current].Channels {
+		out = append(out, string(c))
+	}
+	return out
+}
+
 // clampTicks 把 LLM 给的时长夹进状态的硬边界。
 //
 // 非随机：这是框架的**约束**，不是"在区间里挑一个"。模型说 1 会被抬到
@@ -244,6 +312,7 @@ func (a *Agent) commitStay(want Tick, why string) {
 	// 条件随即变假，risingEdge 会在下个 tick 自动重新武装。
 	a.decideAt = a.Now + ticks
 	a.pending = nil
+	a.endReadEpisode()
 	a.lastRecord = a.stayRecord(why, ticks)
 	a.logDecision(a.lastRecord)
 }
@@ -262,8 +331,19 @@ func (a *Agent) commitEnter(name StateName, want Tick, why string) error {
 	}
 	ticks := a.clampTicks(name, want)
 	a.pending = nil
+	a.endReadEpisode()
 	a.enter(name, "llm", why, ticks)
 	return nil
+}
+
+// endReadEpisode 清掉"先看一眼"这一轮留下的痕迹。
+//
+// 一次决策在这里真正结束时才调用（commitStay / commitEnter）：
+// 读的次数预算与刚读到的内容都属于**这一次询问**，跨决策留着
+// 会让下次的 read_app 预算凭空少一次、打捞查询词带上过期内容。
+func (a *Agent) endReadEpisode() {
+	a.readApps = 0
+	a.pendingRead = nil
 }
 
 // applyDecision 处理一次决策调用回来的结果。
@@ -271,9 +351,26 @@ func (a *Agent) commitEnter(name StateName, want Tick, why string) error {
 // **只有第一次被识别的工具调用生效。** 模型偶尔会一次回多个调用，
 // 挑一个执行比合并执行可预测得多；合并会让"最后到底进了哪个状态"
 // 取决于遍历顺序。
-func (a *Agent) applyDecision(res llmResult) {
+func (a *Agent) applyDecision(ctx context.Context, res llmResult) {
 	for _, c := range res.Calls {
 		switch c.Name {
+		case toolReadApp:
+			// "先看一眼再决定"：读完**不改状态**，也不清 pending。
+			// 等工具结果轮落定后，Step 里的 consider 会发现 pending
+			// 仍非空、且已无在途调用，于是自动重新问一次决策——
+			// 那时内容和记忆都已经在意识流里了。
+			if a.readApps >= maxReadApps {
+				a.log.Warn("read_app_over_budget", "used", a.readApps)
+				continue
+			}
+			if err := a.beginReadApp(ctx, c.Arguments); err != nil {
+				// 读不成（app 看不见、参数坏了）：当成"没识别到这个调用"，
+				// 交给后面的调用或降级分支，而不是把这次询问丢掉。
+				a.log.Warn("read_app_failed", "err", err.Error())
+				continue
+			}
+			a.readApps++
+			return
 		case toolStay:
 			var p struct {
 				Why      string `json:"why"`
@@ -307,6 +404,60 @@ func (a *Agent) applyDecision(res llmResult) {
 	// **绝不**随机挑一个状态。
 	a.log.Warn("decision_unusable", "calls", len(res.Calls))
 	a.commitStay(defaultStayTick, "没想清楚要做什么，先按原样待着")
+}
+
+// beginReadApp 执行一次 read_app：读内容 → 进意识流与待选区 → 发起工具结果轮。
+//
+// 三件事的顺序是有意的：
+//  1. **先读**。读到的内容进意识流（【刚发生】），也由记忆层自动写入
+//     待选区——"看到的都写"，与 Pump 走同一条路。
+//  2. **再打捞**。工具结果轮的 prompt 里会出现【想起的事】，查询词就是
+//     刚读到的内容（见 dredgeQuery）。这是整个设计里打捞唯一的触发点。
+//  3. **最后发问**，且那一轮**不带状态工具**：它只负责读懂与回应，
+//     状态决策仍由下一次 SiteDispatch 单独完成（一次决定只改一次状态）。
+//
+// 返回 error 表示"这一次读不成"，调用方据此降级；它**不**表示读取内容为空
+// （翻到尽头是正常结果，会如实写进意识流）。
+func (a *Agent) beginReadApp(ctx context.Context, args json.RawMessage) error {
+	var p struct {
+		App string `json:"app"`
+		N   int    `json:"n"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return fmt.Errorf("fsm: read_app 参数无法解析: %w", err)
+	}
+	// 信息可见性门控：看不见的 app 不给读（R7 修订）。
+	if !a.states[a.Current].Subscribes(Channel(p.App)) {
+		return fmt.Errorf("fsm: 当前状态看不到 app %q", p.App)
+	}
+	if a.attention == nil {
+		return fmt.Errorf("fsm: 未配置 Attention")
+	}
+
+	n := p.N
+	if n <= 0 {
+		n = defaultReadAppLimit
+	}
+	if n > maxReadAppLimit {
+		n = maxReadAppLimit
+	}
+
+	// ponytail: 只有 QQ 一个通道，翻页仍走 BrowsePhone（它自己按 ChanQQ
+	// 门控）。多通道时这里要改成按 Channel 分派到各自的历史。
+	lines := a.BrowsePhone(n)
+	if len(lines) == 0 {
+		a.appendStreamKind(KindObservation, "往上翻了翻，没有更早的内容了")
+	} else {
+		for _, l := range lines {
+			a.appendStreamKind(KindObservation, l)
+		}
+	}
+	// 留给 dredgeQuery：打捞要拿"刚读到的内容"当查询词。
+	a.pendingRead = lines
+
+	return a.think(ctx, ChatRequest{
+		Prompt: a.Context(SiteToolRead, a.contextOptions()),
+	}, thinkToolRead)
 }
 
 // whyNowText 渲染【为什么现在问你】。
@@ -347,6 +498,12 @@ func (a *Agent) menuText() string {
 	}
 	if len(blocked) > 0 {
 		b.WriteString(fmt.Sprintf("（这些现在不合适：%s）\n", strings.Join(blocked, "；")))
+	}
+	// 信息不够时可以"先看一眼"：读了之后框架会把内容与相关记忆摆出来，
+	// 再重新问一次。只在看得见东西时列出它。
+	if apps := a.visibleApps(); len(apps) > 0 {
+		b.WriteString(fmt.Sprintf("- 想先看看手机上的内容再决定：调 %s，app 填 %s。\n",
+			toolReadApp, strings.Join(apps, "、")))
 	}
 	return b.String()
 }
