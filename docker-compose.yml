@@ -17,76 +17,22 @@
 name: siriusreallife
 
 services:
-  amkr:
-    # 锁死版本，不要用 latest：/amkr/ 反代依赖前端从页面路径推导 API 基址
-    # 的行为（apiBase()），该行为在版本之间变过（docs/llm-amkr.md §4）。
-    #
-    # ⚠️ v4.1.0 **没有** apiBase()，其前端把请求发到根绝对路径
-    # （fetch("/api/settings")），挂在 /amkr/ 下不会经过反代。等 AMKR
-    # 发布含该改动的版本后改成那个 tag。改动前 /amkr/ 页面能打开，
-    # 但管理请求会落到 Sirius 自己的路由上（表现为 404 或空响应）。
-    #
-    # 用变量是为了让"镜像从哪来"可切换而不用改本文件：默认取的 ghcr
-    # 镜像目前是**私有**的，匿名与无凭据环境一律 denied（实测 403）。
-    # 换来源时在 .env 里覆盖 AMKR_IMAGE 即可，见部署文档。
-    image: ${AMKR_IMAGE:-ghcr.io/sparrived/auto-model-key-router:v4.1.0}
-    restart: unless-stopped
-    # ⚠️ 不要加 `--no-ops`。实测 v4.1.0 的 argparse 里**没有**这个参数，
-    # 带上会 "unrecognized arguments" 并 exit 2 无限重启。
-    #
-    # `--no-ops` 目前只存在于 AMKR 的**本地未提交改动**（main.py 新增了
-    # 该开关），既不在 PyPI 4.1.0，也不在 origin/master，因此也不可能在
-    # ghcr 镜像里。等它随版本发布后再改成
-    # ["amkr","--host","0.0.0.0","--serve-foreground","--no-ops"]。
-    # 在此之前运维接口由 Sirius 反代侧 403 兜住
-    # （internal/transport/proxy.go 的 blockedOpsPath，见 docs/llm-amkr.md §4）。
-    #
-    # `--serve-foreground` 是前台模式，容器里必须用它：
-    # 另一个 `--serve` 会 fork 到后台并让主进程退出，容器随即被判为结束
-    # 而无限重启（实测 RestartCount 涨到 9）。
-    # 注意该参数在 4.1.0 里是 `help=argparse.SUPPRESS`，`--help` 里看不到，
-    # 别因为"帮助里没有"就以为不存在。
-    command: ["amkr", "--host", "0.0.0.0", "--serve-foreground"]
-    environment:
-      # 容器内配置、metrics、日志都在 /data 下（AMKR 镜像用 XDG_CACHE_HOME
-      # 把状态推到 /data/auto-model-key-router）。
-      XDG_CACHE_HOME: /data
-      TZ: Asia/Shanghai
-    volumes:
-      # 命名卷：删容器不丢配置。首次启动会生成配置与 local_api_key，
-      # 用 `docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key` 取。
-      - amkr-data:/data
-    extra_hosts:
-      # AMKR 的 provider 可以指向**宿主上已发布端口**的服务（例如同一台
-      # 机器上的另一个模型网关）。Linux 上 host.docker.internal 不会自动
-      # 存在，必须显式声明 host-gateway，否则容器里解析不了这个名字。
-      #
-      # ⚠️ 安全：这让容器能访问宿主的所有监听端口。这里只发布回环端口，
-      # 所以风险等价于容器本身；若宿主的 listen 绑到了 0.0.0.0 则不然。
-      - "host.docker.internal:host-gateway"
-    # 刻意**不**发布端口：Sirius 通过服务名 amkr:8000 访问它。
-    # AMKR 容器内固定监听 0.0.0.0（否则端口映射进不去），所以更要避免
-    # 把 8000 映射出去 —— 那等于把完整管理权限暴露给局域网。
-    expose:
-      - "8000"
-    healthcheck:
-      # /health 免鉴权，是官方推荐的就绪判断（不要用 / 或猜端口）。
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)\""]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
   sirius:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    depends_on:
-      amkr:
-        # 等 AMKR 真的能响应健康检查再启动，避免首轮 LLM 调用全部失败。
-        condition: service_healthy
+    # 这里**曾经**有 depends_on: amkr(service_healthy)，用来等 AMKR 真的能响应健康
+    # 检查再启动，避免首轮 LLM 调用全部失败。AMKR 拆成独立项目后这条跨项目依赖不再
+    # 成立（compose 的 depends_on 只在同一项目内生效），只能去掉。
+    #
+    # 影响与对策：Sirius 可能比 AMKR 先起来，启动瞬间的 LLM 调用会失败（连接被拒），
+    # AMKR 就绪后自愈；Sirius 有重试，因此是可接受的降级。真要消除这个窗口，用
+    # `docker compose -p amkr up -d` -> 等 /health 200 -> 再起 sirius 的顺序，
+    # 而不是把两个服务再绑回一个项目。
     environment:
+      # 走共享网络的服务名别名（AMKR 容器在 amkr-net 上叫 amkr）。
+      # ⚠️ 不要改成 127.0.0.1:28881：容器里的 127.0.0.1 指向 Sirius 自己。
       AMKR_BASE_URL: http://amkr:8000
       AMKR_API_KEY: ${AMKR_API_KEY:?请在 .env 里设置 AMKR_API_KEY}
       AMKR_MODEL: ${AMKR_MODEL:-unified-model}
@@ -118,6 +64,13 @@ services:
       SIRIUS_AUTH_USER: ${SIRIUS_AUTH_USER:-}
       SIRIUS_AUTH_PASS: ${SIRIUS_AUTH_PASS:-}
       TZ: Asia/Shanghai
+    networks:
+      # 加入 AMKR 所在的网络才能用 `amkr` 这个名字解析到它。
+      # 本服务不需要发布任何端口到这个网络：它只是去连 AMKR。
+      # 同时保留项目默认网络 default —— 拆分前 sirius 用的就是它，
+      # 只加不减，出问题时的变量就只有一个。
+      - default
+      - amkr-net
     ports:
       # ⚠️ 只绑宿主回环。唯一被允许的对外入口是有鉴权与 TLS 的那条
       # （Cloudflare Tunnel → 127.0.0.1:18080）。
@@ -136,5 +89,17 @@ services:
       retries: 3
       start_period: 10s
 
-volumes:
-  amkr-data:
+# ⚠️ 这里**不要**再声明 amkr-data 卷。
+#
+# AMKR 的数据卷现在由 /opt/amkr/docker-compose.yml 以 external 方式引用。曾在这里
+# 留下一句 `volumes:\n  amkr-data:`（拆服务后已无任何服务使用它），但 compose 的
+# `down -v` 是按「本文件声明的卷名」删的——**实测**它会把这个正在被 AMKR 使用的卷
+# 连数据一起删掉。删掉这句声明，`down -v` 就再也碰不到它。
+
+networks:
+  # AMKR 的 compose 拥有这个网络（见 /opt/amkr/docker-compose.yml），
+  # 这里以 external 引用它：Sirius 项目的 up/down 不会创建或删除它，
+  # 因此 `docker compose -p siriusreallife down` 不会连带拆掉 AMKR 的网络。
+  amkr-net:
+    external: true
+    name: amkr-net
