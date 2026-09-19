@@ -1,19 +1,23 @@
-# Sirius 人格模拟器的 v1 部署：两个容器。
+# Sirius 人格模拟器的部署：**只剩 sirius 一个服务**。
 #
-# 为什么分开而不是单镜像双进程：AMKR 与 Sirius 的升级节奏、配置、镜像
-# 维护者都不同，合在一起会让"只升 AMKR"变成重打整个镜像。单镜像双进程
-# 留作后续的分发优化，不是 v1 目标（docs/llm-amkr.md §5）。
+# AMKR 已于 2026-09-19 拆成独立部署（/opt/amkr/docker-compose.yml，项目名 amkr）。
+# 为什么拆：AMKR 的升级节奏、镜像来源、状态（配置 + metrics 库）都与 Sirius 无关，
+# 合在一个项目里会让「只升 AMKR」变成动整个 stack，两个服务的生命周期也被绑死。
+# 单镜像双进程仍留作后续的分发优化（docs/llm-amkr.md §5）。
 #
-# 用法：
+# 连通方式：两边共用一个独立网络 amkr-net（由 AMKR 那个项目创建，本文件以 external
+# 引用）。AMKR 在该网络上保留别名 `amkr`，因此 AMKR_BASE_URL 不用改。
+#
+# 用法（**在本目录执行，不要加 -p**；本文件已写死 `name:`，而 `-p` 在别的目录执行会
+# 按项目标签误伤另一个项目的容器 —— 实测在 /opt/amkr 里跑 `-p siriusreallife down`
+# 会拆掉 sirius 的容器）：
 #   cp .env.example .env      # 填 AMKR_API_KEY 等
 #   docker compose up --build
 #
 # 只暴露 Sirius 一个端口，且**绑在宿主回环**（见 ports 的说明）。
 #
-# 项目名必须小写：compose 拒绝大写（`-p SiriusRealLife` 会报
+# 项目名必须小写：compose 拒绝大写（`name: SiriusRealLife` 会报
 # "must consist only of lowercase alphanumeric characters..."）。
-# 这里写死 name，让项目名不随目录名漂移；`-p` 仍可覆盖它，
-# 部署时统一用：docker compose -p siriusreallife ...
 name: siriusreallife
 
 services:
@@ -28,7 +32,7 @@ services:
     #
     # 影响与对策：Sirius 可能比 AMKR 先起来，启动瞬间的 LLM 调用会失败（连接被拒），
     # AMKR 就绪后自愈；Sirius 有重试，因此是可接受的降级。真要消除这个窗口，用
-    # `docker compose -p amkr up -d` -> 等 /health 200 -> 再起 sirius 的顺序，
+    # `cd /opt/amkr && docker compose up -d` -> 等 /health 200 -> 再起 sirius 的顺序，
     # 而不是把两个服务再绑回一个项目。
     environment:
       # 走共享网络的服务名别名（AMKR 容器在 amkr-net 上叫 amkr）。
@@ -99,7 +103,10 @@ services:
 networks:
   # AMKR 的 compose 拥有这个网络（见 /opt/amkr/docker-compose.yml），
   # 这里以 external 引用它：Sirius 项目的 up/down 不会创建或删除它，
-  # 因此 `docker compose -p siriusreallife down` 不会连带拆掉 AMKR 的网络。
+  # 因此 `docker compose down` 不会连带拆掉 AMKR 的网络。
+  #
+  # 用法一律是 `cd` 到本目录后 `docker compose ...`，**不加 `-p`** —— 本文件已写死
+  # `name:`。带 `-p amkr` 之类的参数在别的目录执行会按项目标签误伤另一个项目。
   amkr-net:
     external: true
     name: amkr-net
