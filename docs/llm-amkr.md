@@ -133,7 +133,7 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
   > ⚠️ 这里曾是本文档的一处错误：原文写"路径 1:1 透传，不改写任何段"。那只在**进程内挂载**（`mount_app`）的形态下成立，与两容器独立部署矛盾。已按实测更正，并有回归测试 `TestProxyStripsMountPrefix` 与真实服务端到端测试 `TestLiveAMKRProxy` 钉住。
   >
   > 连带结论：`apiBase()` 与"剥前缀"是**一对**，缺一不可。若用了没有 `apiBase()` 的旧版（前端发根绝对路径 `/api/*`），浏览器会把它发到 Sirius 自己，反代完全收不到。
-- **必须锁定到含 `apiBase()` 的那个 AMKR 版本**（写入 `docker-compose.yml` 的 `image:` 标签，不要用 `latest`）。`v4.1.0`（当前正式版）**没有**这个改动，它随下一个版本发布；接入时填那个 tag。旧版前端用根绝对路径（`fetch("/api/settings")`），挂在 `/amkr/` 下会一律 404 —— 即前端发出的请求根本不会经过 `/amkr/`，反代无从生效。升级 AMKR 时先确认新版本的 `/ui/` 仍从页面路径推导基址，再改标签
+- **必须锁定到含 `apiBase()` 的 AMKR 版本（`>= v5.2.0`），不要用 `latest`。** 镜像 tag 现在写在 **`/opt/amkr/docker-compose.yml`**（AMKR 已是独立项目，见第 5 节），不在本仓库的 compose 里。`v4.1.0` 没有这个改动，其前端把请求发到根绝对路径（`fetch("/api/settings")`），挂在 `/amkr/` 下会一律 404。`v5.2.0` 起 `apiBase()` 有了，`/amkr/` 反代**全链路实测可用**（`/amkr/health` 与带会话的 `/amkr/ui/` 管理请求均正常）。升级 AMKR 时先确认新版本的 `/ui/` 仍从页面路径推导基址，再改标签
 - `Authorization: Bearer $AMKR_API_KEY` 由 Go **在服务端注入**，密钥下发给浏览器就等于泄露。注意 WebUI 自己**总是**会发 `Authorization`（首次访问时 localStorage 为空，实际值是空的 `Bearer `），因此注入必须用 **`Header.Set` 覆盖**，不能用 `Header.Add` 追加 —— Starlette 只会读**第一个** `Authorization` 头，追加时浏览器那个空凭据在前、反代注入的在后，所有管理请求都会 401
 - 必须 **403 掉 `/amkr/api/logs`、`/amkr/api/tool`、`/amkr/api/service/*`、`/amkr/api/integrations/*`**。这些是"操作宿主机"的运维接口（读日志文件、启停进程、注册系统服务、改写本机 Claude Code / Codex 配置），在容器里语义不成立，而且会写脏配置。更稳的做法是启动 AMKR 时加 `--no-ops`（写入配置字段 `ops_enabled`），一次关掉全部四条路径并返回 `404`，不必逐个拉黑；关掉后 `/health` 的 `ops_enabled` 为 `false`，可直接断言
 - `/amkr/` 等同于 AMKR 的完整管理权限。**在 Sirius 自己具备鉴权之前，服务只能绑 `127.0.0.1`**，不得暴露到局域网或公网
@@ -147,10 +147,21 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 
 ## 5. 进程模型与部署
 
-- v1 用 docker compose 两个容器：`amkr` + `sirius`，Sirius 通过服务名访问 `http://amkr:8000`
-- 单镜像双进程是**后续可选的分发优化，不是 v1 目标**。先把链路跑通，再谈合并
+- **AMKR 是独立的 compose 项目**（`/opt/amkr/docker-compose.yml`，项目名 `amkr`），不再和 Sirius 同项目。
+  为什么拆：AMKR 的升级节奏、镜像来源、状态（配置 + metrics 库）都与 Sirius 无关，绑在一个项目里
+  会让「只升 AMKR」变成动整个 stack，两者的生命周期也被绑死。
+- 连通方式：两者共用一个独立网络 `amkr-net`，AMKR 在该网络上**保留别名 `amkr`**，因此
+  `AMKR_BASE_URL=http://amkr:8000` 不用改。网络由 AMKR 那个项目创建，本仓库的 compose 以
+  `external: true` 引用它 —— 在 Sirius 目录里 `down` 不会拆掉 AMKR 的网络。
+- 代价：跨项目的 `depends_on: service_healthy` 不再成立（compose 的 `depends_on` 只在同一项目内
+  生效），Sirius 可能比 AMKR 先起来，启动瞬间的调用会失败、之后自愈。要消除这个窗口就按顺序起：
+  `docker compose -p amkr up -d` → 等 `/health` 返回 200 → 再起 sirius。
+- 单镜像双进程是**后续可选的分发优化，不是当前目标**。先把链路跑通，再谈合并
 - 就绪与存活判断打 AMKR 的 `/health`（该接口免鉴权），不要用 `/` 或猜端口
-- AMKR 容器启动参数带上 `--no-ops`（见第 4 节），并在 compose 里**锁死镜像 tag**，不要用 `latest`：`/amkr/` 反代依赖前端的 `apiBase()` 行为，而该行为在版本之间变过
+- **锁死镜像 tag**，不要用 `latest`：`/amkr/` 反代依赖前端的 `apiBase()` 行为，而该行为在版本之间变过
+- AMKR 容器启动参数是否带 `--no-ops`（见第 4 节）在 `/opt/amkr/docker-compose.yml` 里定。注意
+  `v5.2.0` **已支持** `--no-ops`（实测该 flag 被接受，未知 flag 会报 `flag provided but not defined`），
+  所以「等它发布后再加」这个历史约束已经解除
 - AMKR 镜像的 Dockerfile、tzdata 依赖等由 AMKR 仓库那边负责，**不在本仓库处理**。Sirius 只需假设 AMKR 的 HTTP 契约可用
 
 ### 5.1 AMKR 必须自己配好 provider（否则每次调用都 500）
@@ -193,22 +204,25 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 | `response_format` | 可传 `json_schema`；**忽略它的路由不一定报错**，可能 200 + 散文（见 §2「结构化输出」） |
 | 任务路由冲突 | 任务名与模型名撞名会在**配置加载时**直接报错，不是运行时 |
 | 参数冲突 | 请求里显式传了任务已固定的采样参数 → `400`（见第 2 节） |
-| 容器 | 镜像 `ghcr.io/sparrived/auto-model-key-router`（tag 为版本号，正式版另带 `latest`）。容器内固定监听 `0.0.0.0`（否则端口映射进不去），端口默认 8000，状态在卷 `/data`（配置为 `/data/auto-model-key-router/router-config.json`）。因此 **AMKR 容器不应发布端口**，只让 Sirius 通过服务名访问 |
-| 取本地 key | `docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key`。该命令会直接输出完整凭据，别在共享终端或会记录历史的地方跑 |
+| 容器 | 镜像 `ghcr.io/sparrived/auto-model-key-router`（tag 为版本号，正式版另带 `latest`）。容器内固定监听 `0.0.0.0`（否则端口映射进不去），端口默认 8000，状态在卷 `/data`（配置为 `/data/auto-model-key-router/router-config.json`）。端口**只发布到宿主回环**（`127.0.0.1:28881:8000`），供 Cloudflare Tunnel 反代，见下 |
+| 取本地 key | `docker compose -p amkr exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key`。该命令会直接输出完整凭据，别在共享终端或会记录历史的地方跑 |
 
-### ⚠️ 当前部署的实际状态（v4.1.0）
+### 当前部署的实际状态（v5.2.0，2026-09-19 拆分后）
 
-本文档描述的 `/amkr/` 反代对**已发布的 v4.1.0 只能部分生效**，接入时要知道：
-
-- `/amkr/health`、`/amkr/ui/index.html` 等**静态资源与免鉴权接口正常**（实测 200）。
-- 但 v4.1.0 的 WebUI **没有** `apiBase()`，它的前端把请求发到根绝对路径
-  （`fetch("/api/settings")`），因此这些请求**不经过 `/amkr/` 反代**，会落到
-  Sirius 自己的路由上。表现为管理页面能打开、但一操作就 404 或空白。
-- Go 侧反代实现（剥前缀 + `Header.Set` 注入 + 403 运维接口）已按目标行为
-  写好并有测试覆盖，等 AMKR 发布含 `apiBase()` 的版本后改 `docker-compose.yml`
-  里的 image tag 即可生效。
-- 已知的绕过办法：把 AMKR 容器的 8000 端口发布到宿主回环
-  （`127.0.0.1:28881:8000`），直接访问 `http://127.0.0.1:28881/ui/`，
-  不走 Sirius 反代。**只在宿主回环上发布**，因为那等同于完整管理权限。
+- `/amkr/` 反代**已全链路可用**：上游剥前缀 + `Header.Set` 注入 + 运维路径 403 都生效，
+  浏览器侧保留 `/amkr` 让前端的 `apiBase()` 把请求发到 `/amkr/api/*`。
+- AMKR 是独立项目，容器 `amkr-amkr-1`，镜像 `ghcr.io/sparrived/auto-model-key-router:5.2.0`
+  （**该 GHCR 包已公开**，可匿名拉取）。数据在**无 compose 项目标签**的卷 `amkr-data` 上。
+- 对外的三条路径（都已实测 200）：宿主回环 `http://127.0.0.1:28881`、容器间
+  `http://amkr:8000`、公网 `https://amkr.sparrived.xyz`（Cloudflare Tunnel → 宿主 28881）。
+- ⚠️ **公网那条等同于 AMKR 的完整管理权限**（能读上游 key、能改全部配置）。它靠 AMKR 自身的
+  `local_api_key` 挡住（匿名访问 `/api/*` 实测 401）。主 WebUI 的 Key 存在浏览器 localStorage；
+  嵌入式工作空间面板则把 Key 放在 URL **fragment** 里（`#k=...`，fragment 不发给服务端，见
+  AMKR 仓库的 docs/PANEL.md）。若要进一步收紧，在 Cloudflare 侧给该 hostname 加 Access 策略。
+- ⚠️ AMKR 的**运维 API 仍是开启的**（`/health` 的 `ops_enabled` 为 `true`）。Sirius 的 `/amkr/`
+  反代会 403 掉这几条，但**经宿主 28881 / 公网访问时没有这层保护**，只有 local key 一道鉴权。
+  不想要这个暴露面就给 `/opt/amkr` 的启动参数加 `--no-ops`（v5.2.0 支持）。代价仅限 WebUI
+  设置页：工具信息探针有 `.catch(() => null)` 会静默降级为「读不到」，服务操作按钮则会显示
+  「服务操作失败」——页面本身照常打开。
 
 | 切换 Key | 同一模型配了多个 Key 时由 AMKR 决定用哪个，Sirius 无法（也不需要）指定。走了备选模型时响应带 `X-AMKR-Fallback: true`，可用于观测降级 |

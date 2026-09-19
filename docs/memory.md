@@ -195,7 +195,7 @@ unread 队列 ──进入"看QQ"──► 最近N条直接进 working
 | 向量**存储与检索** | **Sirius** | 索引、持久化、余弦检索、与关键词融合排序 |
 | 融合排序策略 | **Sirius** | 两个分怎么加权，是人格行为的一部分 |
 
-AMKR 的**下一个版本**起把 embeddings 作为一等 route mode 原生支持（`unified_model.embeddings`、上游 `v1/embeddings`）；`v4.1.0` 及更早没有。它是普通 OpenAI 兼容端点，Sirius 侧**无需适配**——但这只省掉"自己跑模型"的成本，**不减少向量库本身的实现工作**。
+AMKR 从 **v5.2.0** 起把 embeddings 作为一等 route mode 原生支持（`unified_model.embeddings`、上游 `v1/embeddings`）——线上跑的就是这个版本，可以直接用；`v4.1.0` 及更早没有。它是普通 OpenAI 兼容端点，Sirius 侧**无需适配**——但这只省掉"自己跑模型"的成本，**不减少向量库本身的实现工作**。
 
 **实现约定：**
 
