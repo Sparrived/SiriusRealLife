@@ -155,7 +155,11 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
   `external: true` 引用它 —— 在 Sirius 目录里 `down` 不会拆掉 AMKR 的网络。
 - 代价：跨项目的 `depends_on: service_healthy` 不再成立（compose 的 `depends_on` 只在同一项目内
   生效），Sirius 可能比 AMKR 先起来，启动瞬间的调用会失败、之后自愈。要消除这个窗口就按顺序起：
-  `docker compose -p amkr up -d` → 等 `/health` 返回 200 → 再起 sirius。
+  `cd /opt/amkr && docker compose up -d` → 等 `/health` 返回 200 → 再起 sirius。
+  两份 compose 都写死了 `name:`，所以**不要**加 `-p`：`docker compose -p amkr down` 在任何
+  目录执行都会按项目标签拆掉 amkr 的容器，但服务定义取自当前目录那份文件 —— 实测在
+  SiriusRealLife 目录里执行会起出一个用 sirius 定义的 `amkr-sirius-1`，同时把真正的
+  `amkr-amkr-1` 停掉删除（还会抢 18080 端口）。`cd` 到正确目录再执行，只用 `name:`。
 - 单镜像双进程是**后续可选的分发优化，不是当前目标**。先把链路跑通，再谈合并
 - 就绪与存活判断打 AMKR 的 `/health`（该接口免鉴权），不要用 `/` 或猜端口
 - **锁死镜像 tag**，不要用 `latest`：`/amkr/` 反代依赖前端的 `apiBase()` 行为，而该行为在版本之间变过
@@ -205,7 +209,7 @@ AMKR 对任务里已固定的参数会直接返回 `400`（它宁可报错也不
 | 任务路由冲突 | 任务名与模型名撞名会在**配置加载时**直接报错，不是运行时 |
 | 参数冲突 | 请求里显式传了任务已固定的采样参数 → `400`（见第 2 节） |
 | 容器 | 镜像 `ghcr.io/sparrived/auto-model-key-router`（tag 为版本号，正式版另带 `latest`）。容器内固定监听 `0.0.0.0`（否则端口映射进不去），端口默认 8000，状态在卷 `/data`（配置为 `/data/auto-model-key-router/router-config.json`）。端口**只发布到宿主回环**（`127.0.0.1:28881:8000`），供 Cloudflare Tunnel 反代，见下 |
-| 取本地 key | `docker compose -p amkr exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key`。该命令会直接输出完整凭据，别在共享终端或会记录历史的地方跑 |
+| 取本地 key | `cd /opt/amkr && docker compose exec amkr amkr --config /data/auto-model-key-router/router-config.json --get-key`。该命令会直接输出完整凭据，别在共享终端或会记录历史的地方跑 |
 
 ### 当前部署的实际状态（v5.2.0，2026-09-19 拆分后）
 
