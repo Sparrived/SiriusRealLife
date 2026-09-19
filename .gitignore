@@ -7,8 +7,11 @@ dist/
 bin/
 
 # local config & secrets
-.env
-.env.local
+# `.env*` 而不是逐个列举：备份文件（.env.bak-*、.env.pre-dedup 等）同样含真 key，
+# 而它们**不在**逐条列举的范围里。实测这些文件会被 `git add -A` 暂存，本仓库是公开的。
+# `.env.example` 是要入库的样例，用否定规则放行。
+.env*
+!.env.example
 
 # 部署连接文档：含服务器地址、端口与登录方式，仓库是公开的（AGENTS.md §4）
 docs/deploy-local.md
